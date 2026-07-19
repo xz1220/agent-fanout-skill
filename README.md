@@ -138,6 +138,12 @@ git clone https://github.com/xz1220/open-dynamic-workflows.git
 cp -r open-dynamic-workflows/skills/open-dynamic-workflows ~/.claude/skills/open-dynamic-workflows
 ```
 
+If `odw` on your PATH is a wrapper, a service uses a separate runtime path, or
+your adapters enter a sandbox, read
+[Safely upgrading a customized installation](docs/recipes/custom-install-upgrades.md)
+before re-running the installer. Its default destination replaces
+`~/.local/bin/odw`.
+
 Or, **once `odw` is published to npm** (not yet — see [Develop](#develop)) and you
 have Node ≥20, `npm i -g odw` will put `odw` on your PATH (you'd still do step *b*
 for the skill). For now, use the binary above.

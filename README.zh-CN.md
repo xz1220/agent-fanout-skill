@@ -130,6 +130,11 @@ git clone https://github.com/xz1220/open-dynamic-workflows.git
 cp -r open-dynamic-workflows/skills/open-dynamic-workflows ~/.claude/skills/open-dynamic-workflows
 ```
 
+如果 PATH 上的 `odw` 是包装器、服务使用独立运行时路径,或 adapter 需要进入沙箱,
+再次运行安装器前请先阅读
+[自定义安装的安全升级指南](docs/recipes/custom-install-upgrades.md)(英文)。安装器的默认目标
+会替换 `~/.local/bin/odw`。
+
 或者,**等 `odw` 发布到 npm 之后**(目前还没有——见 [开发](#开发))、且你有 Node ≥20,
 `npm i -g odw` 就能把 `odw` 装到 PATH 上(skill 仍按上面第 *b* 步装)。在那之前请用上面的二进制。
 

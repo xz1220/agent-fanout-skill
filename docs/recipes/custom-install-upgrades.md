@@ -54,6 +54,38 @@ exec "$HOME/.local/libexec/odw-runtime/odw" "$@"
 Keep sandbox setup in the agent adapter commands or their wrappers. ODW is the
 orchestrator; each `agent()` call executes the configured local CLI command.
 
+## Optional managed root workflow
+
+A customized host can restrict packaged ODW binaries to one audited root
+workflow without changing the workflow dialect. Install a root-owned policy at
+`/etc/odw/execution-policy.json`:
+
+```json
+{
+  "version": 1,
+  "root": {
+    "name": "dynamic-work-pool",
+    "path": "/home/example/.odw/workflows/dynamic-work-pool.js",
+    "sha256": "<64 lowercase hex characters>"
+  },
+  "allowedInlineOrigins": ["chat"],
+  "nested": []
+}
+```
+
+The packaged binary discovers that conventional path automatically. Source and
+development launches only enable the boundary when `ODW_EXECUTION_POLICY`
+points to an absolute policy path. The policy file and its parent must be owned
+by root, must not be group/world writable, and must not be symlinks. Root and
+nested workflows are matched by canonical path, declared name, and SHA-256;
+the exact authorized root source is archived into the run and verified again
+by the worker before its body executes.
+
+After changing the managed workflow, update its policy hash atomically before
+acceptance testing. A stale hash fails closed. Keep `allowedInlineOrigins`
+empty unless a trusted built-in source such as the Chat Host must remain
+available, and explicitly pin every allowed nested workflow.
+
 ## Preflight
 
 Before replacing a customized runtime:
@@ -63,9 +95,9 @@ Before replacing a customized runtime:
 2. Record `odw --version`, the runtime binary checksum, the service definition,
    and the wrapper checksum.
 3. Back up the wrapper, the canonical binary, `~/.config/odw/config.json`, and
-   any custom managed workflows. Keep config backups private because adapter
-   definitions may contain literal secrets or credential-bearing environment
-   settings.
+   any custom managed workflows and host execution policy. Keep config backups
+   private because adapter definitions may contain literal secrets or
+   credential-bearing environment settings.
 4. Read the release diff for changes to config loading, workflow primitives,
    workspace isolation, CLI flags, and the worker launcher.
 5. Prepare a rollback copy of the previous canonical binary before installation.

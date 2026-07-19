@@ -28,6 +28,7 @@ import { AGENT_FAILED, AGENT_FINISHED, AGENT_STARTED, LOG, PHASE_STARTED, event 
 import { loadWorkflowScript, scanDualCompat, type WorkflowMeta } from "./loader.js";
 import type { JsonSchema } from "./schema.js";
 import { resolveWorkflow } from "./workflows/resolve.js";
+import { authorizeNestedWorkflow } from "./runtime/execution-policy.js";
 
 export interface AgentOptions {
   /** Which configured adapter/CLI to use; falls back to the default. */
@@ -215,6 +216,11 @@ export function createPrimitives(
     }
     const loaded = loadWorkflowScript(text, scriptPath); // throws on a syntax error
     const name = loaded.meta.name;
+    authorizeNestedWorkflow(ctx.executionPolicy, {
+      workflowName: name,
+      scriptPath,
+      sourceCode: text,
+    });
     const entryLane = `▸ ${name}`;
     // The child gets its own phase cursor (so a concurrent parent agent keeps
     // its label) but shares everything that costs or controls: scheduler,

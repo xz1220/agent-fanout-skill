@@ -22,6 +22,7 @@ import { loadWorkflowScript } from "../loader.js";
 import { createPrimitives } from "../primitives.js";
 import { FileControl } from "./file-control.js";
 import { JsonlSink, RunStore } from "./run-store.js";
+import { loadHostExecutionPolicy, verifyRootReceipt } from "./execution-policy.js";
 
 /** Run the workflow described by `runDir`; return its terminal state. */
 export async function executeRun(runDir: string): Promise<string> {
@@ -30,7 +31,6 @@ export async function executeRun(runDir: string): Promise<string> {
 
   const meta = store.readMeta(runId);
   const script = meta.script as string | undefined;
-  if (!script) throw new Error(`no run metadata found at ${runDir}`);
 
   const sink = new JsonlSink(store.eventsPath(runId));
   const args = meta.args;
@@ -41,6 +41,14 @@ export async function executeRun(runDir: string): Promise<string> {
   const spent = () => (ctx ? spentTokens(ctx.usage) : 0);
 
   try {
+    if (!script) throw new Error(`no run metadata found at ${runDir}`);
+    const source = readFileSync(script, "utf8");
+    const loaded = loadWorkflowScript(source, script);
+    const executionPolicy = loadHostExecutionPolicy();
+    verifyRootReceipt(executionPolicy, meta.executionPolicy, {
+      workflowName: loaded.meta.name,
+      sourceCode: source,
+    });
     const baseConfig = loadConfig((meta.configPath as string | null) ?? null);
     // Run-level adapter override (meta.adapter): becomes this run's default for
     // every `agent()` call that does not name one explicitly. Priority chain:
@@ -60,13 +68,12 @@ export async function executeRun(runDir: string): Promise<string> {
       sink,
       control,
       budgetTotal: (meta.budgetTotal as number | null) ?? null,
+      executionPolicy,
     });
 
     store.updateStatus(runId, { state: "running", pid: process.pid });
     sink.emit(event(RUN_STARTED, { runId }));
 
-    const source = readFileSync(script, "utf8");
-    const loaded = loadWorkflowScript(source, script);
     // The run-by-name lookup keys on the filename stem, not meta.name. Flag a
     // divergence (through the event stream, so it shows in `odw logs` and the
     // dashboard) so the author knows which token actually invokes this file.
@@ -75,8 +82,8 @@ export async function executeRun(runDir: string): Promise<string> {
     const stem = basename(script).replace(/\.[^.]*$/, "");
     // Inline-launched runs (meta.inline) carry their script inside the run dir
     // and are not name-addressable, so the divergence note would only mislead.
-    const isInline = meta.inline === true;
-    if (!isInline && loaded.meta.name !== stem) {
+    const isArchived = meta.inline === true || meta.archived === true;
+    if (!isArchived && loaded.meta.name !== stem) {
       sink.emit(
         event(LOG, {
           message:

@@ -73,6 +73,13 @@ test("the generate-workflow source itself compiles in the dialect", () => {
   );
 });
 
+test("authoring guidance requires reuse, atomic fan-out, and an explicit null gate", () => {
+  assert.match(SKILL_MD, /odw workflows list --all/);
+  assert.match(SKILL_MD, /concurrency is only a ceiling/i);
+  assert.match(PATTERNS_DIGEST, /planner-first atomic fan-out/);
+  assert.match(GENERATE_WORKFLOW_SOURCE, /count them and recover or fail/);
+});
+
 test("a valid first draft passes in one attempt", async () => {
   const root = mkdtempSync(join(tmpdir(), "odw-gen-"));
   try {

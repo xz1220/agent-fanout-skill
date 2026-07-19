@@ -46,7 +46,12 @@ export const PATTERNS_DIGEST = `Known orchestration patterns (pick what fits; co
 7. generate-and-filter — overproduce ideas in parallel, dedupe in plain code, keep what passes a rubric.
 
 8. duel loop (two CLIs) — one adapter implements, another reviews; a FAIL verdict becomes the
-   next round's instruction: agent(fix, { adapter: 'claude' }) ↔ agent(review, { adapter: 'codex' }).`;
+   next round's instruction: agent(fix, { adapter: 'claude' }) ↔ agent(review, { adapter: 'codex' }).
+
+9. planner-first atomic fan-out — for broad repository work, first return a structured plan of
+   independently verifiable leaf tasks (files/components/tests/evidence), then parallel(tasks.map(...)).
+   Adapter count does not determine task count; concurrency is only a ceiling. Count null slots and
+   recover or fail before any completeness-sensitive synthesis.`;
 
 /**
  * The workflow source. Plain dialect JavaScript; it uses the `validate` global
@@ -83,7 +88,9 @@ const HARD_RULES = [
   'NEVER use Date.now(), Math.random(), or new Date() with no arguments.',
   'Top-level await and top-level return are allowed; the final return is the result.',
   'agent(prompt, opts) returns reply text, or a validated object when opts.schema is set.',
-  'parallel() slots can be null on failure — .filter(Boolean) before using results.',
+  'For broad work, plan independently verifiable atomic leaves before fan-out; never split merely by adapter count.',
+  'Concurrency is only a ceiling; the script must create enough independent thunks to use it.',
+  'parallel() slots can be null on failure — count them and recover or fail before completeness-sensitive synthesis.',
   'Do not hardcode adapter names unless the task explicitly needs distinct CLIs per role.',
 ].join('\\n- ')
 

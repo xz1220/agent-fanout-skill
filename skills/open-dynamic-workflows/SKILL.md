@@ -20,9 +20,22 @@ ordinary code, executed by `odw` in a detached background process, dispatching
 each subtask to a real coding-agent CLI process. Intermediate output never
 enters your context; all that comes back is the script's final `return` value.
 
-The flow is always three steps: **write the script → `odw run` → inspect the
-result, then act**. Don't use this for work that fits in a single call — just
-do it directly.
+The flow is: **reuse a managed workflow when one fits → otherwise write one
+small script → `odw run` → inspect the result, then act**. Don't use this for
+work that fits in a single call — just do it directly.
+
+Before authoring anything, run `odw workflows list --all` and inspect likely
+matches with `odw workflows where <name>`. Prefer one existing, generic
+workflow over accumulating one-off or project-specific workflows. Author a new
+script only when its control flow is genuinely different and reusable.
+
+For broad repository work, task count comes from the real leaf work (files,
+components, tests, or independently verifiable evidence), not from the number
+of adapters. The configured concurrency is only a ceiling: six broad thunks
+still produce at most six-way concurrency even when the ceiling is 32. Plan
+atomic leaves first, then fan them out. If completeness matters, count `null`
+slots and recover or fail before synthesis; never silently summarize an
+incomplete batch as success.
 
 ## Write the workflow script
 
@@ -154,6 +167,7 @@ which vendor's CLI (and whose quota/permissions) every bare `agent()` call uses.
 | --- | --- |
 | Importing primitives or other modules in the script | Primitives are injected globals; any extra top-level `import`/`export` is rejected by the loader. |
 | Variables, spreads, or function calls inside `meta` | `meta` must be a pure literal. |
-| Expecting failures inside `parallel`/`pipeline` to throw | A failed slot is `null`; `.filter(Boolean)` before reducing. |
+| Treating a concurrency setting as guaranteed fan-out | It is only a ceiling; create enough independent atomic thunks to use it. |
+| Expecting failures inside `parallel`/`pipeline` to throw | A failed slot is `null`; count and recover/fail before a completeness-sensitive reduction. |
 | Branching on which agent finished first | Breaks reproducibility; keep reductions order-independent. |
 | Using `validate()` and expecting the script to run on Claude Code | `validate` is an ODW extension and runs on odw only. |

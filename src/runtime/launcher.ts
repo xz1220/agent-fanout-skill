@@ -19,6 +19,12 @@ import { loadWorkflowScript } from "../loader.js";
 import { isSeaBinary } from "../sea.js";
 import { resolveWorkflow } from "../workflows/resolve.js";
 import { RunStore, TERMINAL_STATES } from "./run-store.js";
+import {
+  authorizeRootWorkflow,
+  loadHostExecutionPolicy,
+  type ExecutionPolicy,
+  type ExecutionPolicyReceipt,
+} from "./execution-policy.js";
 
 export interface StartRunOptions {
   args?: unknown;
@@ -43,16 +49,27 @@ export interface StartRunOptions {
  * one place means a new StartRunOption or validation rule lands for path-based
  * AND inline launches at once.
  */
-function prepare(options: StartRunOptions): { config: Config; source: string; store: RunStore } {
+function prepare(options: StartRunOptions): {
+  config: Config;
+  source: string;
+  store: RunStore;
+  executionPolicy: ExecutionPolicy | null;
+} {
   const config = loadConfig(options.configPath ?? null); // validates config & resolves defaults
   const source = options.source ? resolve(options.source) : process.cwd();
   if (options.adapter) resolveAdapter(config, options.adapter); // fail fast on unknown names
   const store = new RunStore(options.runsRoot ?? resolveRunsRoot(config.settings.runsRoot));
-  return { config, source, store };
+  const executionPolicy = loadHostExecutionPolicy();
+  return { config, source, store, executionPolicy };
 }
 
 /** The CreateRunInput fields every launch shares, given its resolved source. */
-function commonCreateInput(options: StartRunOptions, source: string, workflowName: string | null) {
+function commonCreateInput(
+  options: StartRunOptions,
+  source: string,
+  workflowName: string | null,
+  executionPolicy: ExecutionPolicyReceipt | null,
+) {
   return {
     args: options.args,
     configPath: options.configPath ?? null,
@@ -61,6 +78,7 @@ function commonCreateInput(options: StartRunOptions, source: string, workflowNam
     workflowName,
     adapter: options.adapter ?? null,
     origin: options.origin ?? null,
+    executionPolicy,
   };
 }
 
@@ -69,7 +87,7 @@ export function startRun(
   script: string,
   options: StartRunOptions = {},
 ): { runId: string; store: RunStore } {
-  const { config, source, store } = prepare(options);
+  const { config, source, store, executionPolicy } = prepare(options);
   // `script` may be a path (./wf.js) or a managed-directory name (deep-research);
   // resolve against `source` so --source steers both literal paths and name lookup.
   const { scriptPath } = resolveWorkflow(script, { cwd: source, config });
@@ -80,13 +98,32 @@ export function startRun(
   // executes the body. A malformed script leaves the name unknown (the run still
   // gets created, then the worker records it as failed in the normal way).
   let workflowName: string | null = null;
+  let sourceCode: string | null = null;
   try {
-    workflowName = loadWorkflowScript(readFileSync(scriptPath, "utf8"), scriptPath).meta.name;
-  } catch {
+    sourceCode = readFileSync(scriptPath, "utf8");
+    workflowName = loadWorkflowScript(sourceCode, scriptPath).meta.name;
+  } catch (err) {
+    if (executionPolicy) throw err;
     workflowName = null;
   }
 
-  const runId = store.create({ script: scriptPath, ...commonCreateInput(options, source, workflowName) });
+  const policyReceipt = executionPolicy
+    ? authorizeRootWorkflow(executionPolicy, {
+        workflowName: workflowName!,
+        sourceCode: sourceCode!,
+        scriptPath,
+        origin: options.origin,
+      })
+    : null;
+  const runId = store.create(
+    policyReceipt
+      ? {
+          script: "",
+          archivedSource: sourceCode!,
+          ...commonCreateInput(options, source, workflowName, policyReceipt),
+        }
+      : { script: scriptPath, ...commonCreateInput(options, source, workflowName, null) },
+  );
   spawnWorker(store, runId, source);
   return { runId, store };
 }
@@ -106,19 +143,27 @@ export function startRunFromSource(
   sourceCode: string,
   options: StartRunOptions & { allowInvalid?: boolean } = {},
 ): { runId: string; store: RunStore } {
-  const { source, store } = prepare(options);
+  const { source, store, executionPolicy } = prepare(options);
 
   let workflowName: string | null = null;
   try {
     workflowName = loadWorkflowScript(sourceCode, "workflow.js").meta.name;
   } catch (err) {
-    if (!options.allowInvalid) throw err; // surface the compile error to the caller
+    if (!options.allowInvalid || executionPolicy) throw err; // policy can never authorize unknown code
   }
+
+  const policyReceipt = executionPolicy
+    ? authorizeRootWorkflow(executionPolicy, {
+        workflowName: workflowName!,
+        sourceCode,
+        origin: options.origin,
+      })
+    : null;
 
   const runId = store.create({
     script: "",
     inlineSource: sourceCode,
-    ...commonCreateInput(options, source, workflowName),
+    ...commonCreateInput(options, source, workflowName, policyReceipt),
   });
   spawnWorker(store, runId, source);
   return { runId, store };

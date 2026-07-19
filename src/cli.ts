@@ -521,7 +521,17 @@ async function cmdRerun(rest: string[]): Promise<number> {
   // (the old run's configPath may point runsRoot somewhere the CLI-flag store
   // does not) — never through the store the OLD run was located with.
   let started: { runId: string; store: RunStore };
-  if (meta.inline === true) {
+  const policyReceipt =
+    meta.executionPolicy && typeof meta.executionPolicy === "object"
+      ? (meta.executionPolicy as Record<string, unknown>)
+      : null;
+  const pinnedRootPath =
+    meta.archived === true && policyReceipt?.mode === "root" && typeof policyReceipt.originalPath === "string"
+      ? policyReceipt.originalPath
+      : null;
+  if (pinnedRootPath) {
+    started = startRun(pinnedRootPath, opts);
+  } else if (meta.inline === true) {
     let sourceCode: string;
     try {
       sourceCode = readFileSync(script, "utf8");

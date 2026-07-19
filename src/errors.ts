@@ -25,6 +25,9 @@ export class DynamicWorkflowError extends Error {
 /** The adapter/run configuration could not be loaded or is invalid. */
 export class ConfigError extends DynamicWorkflowError {}
 
+/** A host-owned execution policy rejected an untrusted workflow entry. */
+export class ExecutionPolicyError extends ConfigError {}
+
 /** A workflow referenced an adapter name that is not configured. */
 export class AdapterNotFound extends ConfigError {}
 

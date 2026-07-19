@@ -41,6 +41,7 @@ import {
 import { basename, join } from "node:path";
 
 import type { EventSink, WorkflowEvent } from "../events.js";
+import type { ExecutionPolicyReceipt } from "./execution-policy.js";
 
 /** Terminal states: a run in one of these will not change again. */
 export const TERMINAL_STATES = new Set(["done", "failed", "stopped"]);
@@ -52,6 +53,15 @@ const RESULT = "result.json";
 const ERROR = "error.json";
 const CONTROL = "control.json";
 const LOG = "worker.log";
+
+/** Stable sentinel for the bytes immediately before an incremental cursor. */
+function cursorTail(fd: number, offset: number): string {
+  const length = Math.min(64, Math.max(0, offset));
+  if (length === 0) return "";
+  const buffer = Buffer.alloc(length);
+  const read = readSync(fd, buffer, 0, length, offset - length);
+  return buffer.subarray(0, read).toString("base64");
+}
 
 export interface CreateRunInput {
   /**
@@ -68,10 +78,14 @@ export interface CreateRunInput {
   workflowName?: string | null;
   /** Workflow source to materialise inside the run dir (inline launches). */
   inlineSource?: string | null;
+  /** Validated path workflow source archived by a host execution policy. */
+  archivedSource?: string | null;
   /** Run-level adapter override: the default `agent()` adapter for this run. */
   adapter?: string | null;
   /** Where the run was initiated from (e.g. "chat" for Chat Host runs). */
   origin?: string | null;
+  /** Immutable authorization receipt verified again by the worker. */
+  executionPolicy?: ExecutionPolicyReceipt | null;
 }
 
 /** A run plus the workflow it belongs to, returned by listing. */
@@ -89,17 +103,21 @@ export class RunStore {
   // --- creation & paths ------------------------------------------------------
 
   create(input: CreateRunInput): string {
+    if (input.inlineSource != null && input.archivedSource != null) {
+      throw new Error("inlineSource and archivedSource are mutually exclusive");
+    }
     const runId = newRunId();
-    const bucket = bucketFor(input.workflowName, input.inlineSource != null ? "workflow.js" : input.script);
+    const materializedSource = input.inlineSource ?? input.archivedSource ?? null;
+    const bucket = bucketFor(input.workflowName, materializedSource != null ? "workflow.js" : input.script);
     const dir = join(this.root, bucket, runId);
     mkdirSync(dir, { recursive: true });
     this.dirCache.set(runId, dir);
     let script = input.script;
-    if (input.inlineSource != null) {
-      // Materialise the inline source before meta.json so a reader never sees a
+    if (materializedSource != null) {
+      // Materialise archived source before meta.json so a reader never sees a
       // meta that points at a not-yet-written file.
       script = join(dir, "workflow.js");
-      writeFileSync(script, input.inlineSource, "utf8");
+      writeFileSync(script, materializedSource, "utf8");
     }
     writeJson(join(dir, META), {
       runId,
@@ -111,10 +129,12 @@ export class RunStore {
       workflowName: input.workflowName ?? null,
       adapter: input.adapter ?? null,
       origin: input.origin ?? null,
+      executionPolicy: input.executionPolicy ?? null,
       // First-class fact (not inferred from path topology): the script lives in
       // this run dir because it was launched from inline source. Drives the
       // worker's run-by-name divergence exemption and `odw rerun` re-archival.
       inline: input.inlineSource != null,
+      archived: input.archivedSource != null,
       createdAt: now(),
     });
     writeJson(join(dir, STATUS), { runId, state: "pending", dispatched: 0, updatedAt: now() });
@@ -197,15 +217,15 @@ export class RunStore {
    * `cursor` and the cursor to pass next time. The cursor only ever advances to
    * a byte offset just past a complete `\n`-terminated line, so a torn tail
    * (mid-append) is simply left for the next poll and a multi-byte character
-   * can never be split. Two replacement guards reset the cursor to 0 instead of
-   * misreading: a file smaller than the cursor (truncated in place), and a
-   * changed inode (replaced wholesale — even one that already grew past the old
-   * offset, which a size check alone would silently read from the middle of).
+   * can never be split. Replacement guards reset the cursor to 0 instead of
+   * misreading: a file smaller than the cursor, a changed inode, or a changed
+   * byte sentinel before the cursor (needed when a filesystem immediately
+   * reuses the deleted file's inode).
    */
   readEventsSince(
     runId: string,
-    cursor: { offset: number; ino?: number },
-  ): { events: WorkflowEvent[]; cursor: { offset: number; ino?: number } } {
+    cursor: { offset: number; ino?: number; tail?: string },
+  ): { events: WorkflowEvent[]; cursor: { offset: number; ino?: number; tail?: string } } {
     const path = this.eventsPath(runId);
     let fd: number;
     try {
@@ -216,14 +236,27 @@ export class RunStore {
     try {
       const stat = fstatSync(fd);
       const size = stat.size;
-      const sameFile = cursor.ino === undefined || cursor.ino === stat.ino;
-      const offset = !sameFile || size < cursor.offset ? 0 : cursor.offset;
-      if (size === offset) return { events: [], cursor: { offset, ino: stat.ino } };
+      // Some filesystems immediately reuse an inode after unlink+create. Keep a
+      // small byte sentinel from immediately before the cursor as well: normal
+      // appends preserve it, while a replacement that reused the inode resets
+      // safely to byte 0. If the prefix is identical, skipping it is correct.
+      const sameInode = cursor.ino === undefined || cursor.ino === stat.ino;
+      const sameTail =
+        cursor.tail === undefined ||
+        cursor.offset === 0 ||
+        (size >= cursor.offset && cursorTail(fd, cursor.offset) === cursor.tail);
+      const sameFile = sameInode && sameTail && size >= cursor.offset;
+      const offset = sameFile ? cursor.offset : 0;
+      if (size === offset) {
+        return { events: [], cursor: { offset, ino: stat.ino, tail: cursorTail(fd, offset) } };
+      }
       const buf = Buffer.alloc(size - offset);
       const read = readSync(fd, buf, 0, buf.length, offset);
       const chunk = buf.subarray(0, read);
       const lastNl = chunk.lastIndexOf(0x0a);
-      if (lastNl === -1) return { events: [], cursor: { offset, ino: stat.ino } }; // torn tail only
+      if (lastNl === -1) {
+        return { events: [], cursor: { offset, ino: stat.ino, tail: cursorTail(fd, offset) } };
+      }
       const events: WorkflowEvent[] = [];
       for (const line of chunk.subarray(0, lastNl + 1).toString("utf8").split("\n")) {
         const trimmed = line.trim();
@@ -234,7 +267,11 @@ export class RunStore {
           // Complete but unparsable line — skip it, same tolerance as readEvents.
         }
       }
-      return { events, cursor: { offset: offset + lastNl + 1, ino: stat.ino } };
+      const nextOffset = offset + lastNl + 1;
+      return {
+        events,
+        cursor: { offset: nextOffset, ino: stat.ino, tail: cursorTail(fd, nextOffset) },
+      };
     } finally {
       closeSync(fd);
     }

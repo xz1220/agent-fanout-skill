@@ -15,6 +15,7 @@ import { NullControl, type Control } from "./control.js";
 import { BudgetExhausted } from "./errors.js";
 import { NullSink, type EventSink, type WorkflowEvent } from "./events.js";
 import { Scheduler } from "./scheduler.js";
+import type { ExecutionPolicy } from "./runtime/execution-policy.js";
 
 export interface RunContext {
   config: Config;
@@ -41,6 +42,8 @@ export interface RunContext {
    */
   seq: { value: number };
   currentPhase: string | null;
+  /** Active host-owned workflow boundary, shared with nested workflow(). */
+  executionPolicy: ExecutionPolicy | null;
   emit(ev: WorkflowEvent): void;
 }
 
@@ -55,6 +58,7 @@ export interface BuildContextOptions {
   sink?: EventSink;
   control?: Control;
   budgetTotal?: number | null;
+  executionPolicy?: ExecutionPolicy | null;
 }
 
 /** Wire a full run context from a config and the run's surroundings. */
@@ -90,6 +94,7 @@ export function buildContext(config: Config, options: BuildContextOptions = {}):
     usage,
     seq: { value: 0 },
     currentPhase: null,
+    executionPolicy: options.executionPolicy ?? null,
     emit(ev: WorkflowEvent): void {
       sink.emit(ev);
     },

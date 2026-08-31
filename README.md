@@ -314,7 +314,7 @@ Cursor work out of the box:
 | `gemini` | `gemini` | text on stdout |
 | `qwen` | `qwen` | text on stdout |
 | `kimi` | `kimi` | text on stdout |
-| `omp` | `omp` | `--print --no-tools --no-session`; prompt on stdin |
+| `omp` | `omp` | `--print --no-session --approval-mode yolo`; prompt on stdin |
 | `kilo` | `kilo` | `run --format json --auto`; final text decoded from JSONL |
 | `opencode` | `opencode` | `run --format json --auto`; final text decoded from JSONL |
 | `cursor` | `agent` | `--print --force --trust`; prompt on stdin |

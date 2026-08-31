@@ -294,7 +294,7 @@ Codex、Claude Code、Gemini、Qwen、Kimi、Oh My Pi、Kilo Code、OpenCode、C
 | `gemini` | `gemini` | stdout 文本 |
 | `qwen` | `qwen` | stdout 文本 |
 | `kimi` | `kimi` | stdout 文本 |
-| `omp` | `omp` | `--print --no-tools --no-session`;stdin 传提示词 |
+| `omp` | `omp` | `--print --no-session --approval-mode yolo`;stdin 传提示词 |
 | `kilo` | `kilo` | `run --format json --auto`;从 JSONL 解出最终文本 |
 | `opencode` | `opencode` | `run --format json --auto`;从 JSONL 解出最终文本 |
 | `cursor` | `agent` | `--print --force --trust`;stdin 传提示词 |

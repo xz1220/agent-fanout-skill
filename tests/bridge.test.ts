@@ -130,3 +130,28 @@ test("new harness adapters send prompts on stdin and route workspace and model f
     assert.equal(command[modelFlag + 1], `${name}/model`);
   }
 });
+
+test("Gemini runs headlessly with an expanded --prompt argument", async () => {
+  const config = defaultConfig();
+  config.settings.defaultAdapter = "gemini";
+  let command: string[] = [];
+  let stdin: string | undefined;
+  const bridge = new Bridge(config, {
+    runner: async (actual, options) => {
+      command = actual;
+      stdin = options?.stdin;
+      return ok("gemini answer");
+    },
+  });
+
+  const out = await bridge.run({ prompt: "ask gemini", model: "gemini-3" });
+  assert.equal(out.text, "gemini answer");
+  const promptFlag = command.indexOf("--prompt");
+  assert.ok(promptFlag >= 0, `expected --prompt in ${JSON.stringify(command)}`);
+  assert.match(command[promptFlag + 1]!, /automated multi-agent workflow/);
+  assert.match(command[promptFlag + 1]!, /ask gemini/);
+  assert.equal(stdin, undefined);
+  const modelFlag = command.indexOf("--model");
+  assert.ok(modelFlag >= 0, `expected --model in ${JSON.stringify(command)}`);
+  assert.equal(command[modelFlag + 1], "gemini-3");
+});

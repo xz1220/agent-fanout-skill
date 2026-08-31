@@ -25,9 +25,23 @@ test("defaultConfig ships all nine built-in adapters", () => {
 test("new built-ins declare their automation, model, workspace, and output contracts", () => {
   const { adapters } = defaultConfig();
   assert.deepEqual(adapters.omp!.flags?.model, ["--model"]);
-  assert.ok(adapters.omp!.command.includes("--no-session"));
-  assert.ok(adapters.omp!.command.includes("--no-tools"));
+  assert.deepEqual(adapters.omp!.command, [
+    "omp",
+    "--print",
+    "--no-session",
+    "--approval-mode",
+    "yolo",
+    "--cwd",
+    "{workspace}",
+  ]);
   assert.equal(adapters.omp!.stdin, "{prompt}");
+  assert.deepEqual(adapters.gemini!.command, [
+    "gemini",
+    "--approval-mode",
+    "auto_edit",
+    "--prompt",
+    "{prompt}",
+  ]);
 
   for (const name of ["kilo", "opencode"]) {
     const adapter = adapters[name]!;
@@ -47,6 +61,13 @@ test("new built-ins declare their automation, model, workspace, and output contr
   assert.ok(adapters.cursor!.command.includes("--trust"));
   assert.ok(adapters.cursor!.command.includes("{workspace}"));
   assert.equal(adapters.cursor!.stdin, "{prompt}");
+});
+
+test("config example preserves every built-in adapter contract", () => {
+  const config = loadConfig(join(process.cwd(), "odw.config.example.json"));
+  for (const [name, adapter] of Object.entries(defaultConfig().adapters)) {
+    assert.deepEqual(config.adapters[name], adapter, `example adapter '${name}' must match its built-in`);
+  }
 });
 
 test("loadConfig merges a user file over the built-ins (user wins)", () => {

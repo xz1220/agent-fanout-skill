@@ -14,35 +14,40 @@
   "adapters": {
     "codex": {
       "label": "Codex CLI",
-      "command": ["codex", "exec", "--skip-git-repo-check", "--sandbox", "workspace-write", "--cd", "{workspace}", "-"],
-      "stdin": "{prompt}"
+      "command": ["codex", "--search", "exec", "--skip-git-repo-check", "--sandbox", "workspace-write", "--cd", "{workspace}", "-"],
+      "stdin": "{prompt}",
+      "flags": { "model": ["--model"] }
     },
     "claude": {
       "label": "Claude Code",
-      "command": ["claude", "--print", "--permission-mode", "acceptEdits", "--no-session-persistence"],
-      "stdin": "{prompt}"
+      "command": ["claude", "--print", "--permission-mode", "acceptEdits", "--allowedTools", "WebSearch", "WebFetch", "--no-session-persistence"],
+      "stdin": "{prompt}",
+      "flags": { "model": ["--model"] }
     },
     "gemini": {
       "label": "Gemini CLI",
-      "command": ["gemini", "--approval-mode", "auto_edit", "{prompt}"]
+      "command": ["gemini", "--approval-mode", "auto_edit", "--prompt", "{prompt}"],
+      "flags": { "model": ["--model"] }
     },
     "qwen": {
       "label": "Qwen Code",
-      "command": ["qwen", "--approval-mode", "auto-edit", "--output-format", "text", "{prompt}"]
+      "command": ["qwen", "--approval-mode", "auto-edit", "--output-format", "text", "{prompt}"],
+      "flags": { "model": ["--model"] }
     },
     "kimi": {
       "label": "Kimi CLI",
       "command": ["kimi", "--work-dir", "{workspace}", "--print", "--input-format", "text", "--output-format", "text"],
-      "stdin": "{prompt}"
+      "stdin": "{prompt}",
+      "flags": { "model": ["--model"] }
     },
     "omp": {
       "label": "Oh My Pi",
-      "command": ["omp", "--print", "--no-tools", "--no-session", "--approval-mode", "yolo", "--cwd", "{workspace}"],
+      "command": ["omp", "--print", "--no-session", "--approval-mode", "yolo", "--cwd", "{workspace}"],
       "stdin": "{prompt}",
       "flags": { "model": ["--model"] }
     },
     "kilo": {
-      "label": "Kilo Code CLI",
+      "label": "Kilo Code",
       "command": ["kilo", "run", "--format", "json", "--auto", "--dir", "{workspace}"],
       "stdin": "{prompt}",
       "flags": { "model": ["--model"] },

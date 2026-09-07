@@ -10,7 +10,7 @@ Dynamic Protocol 由三个契约组成，三者共同构成 odw 与一切上层�
 | 契约 | 载体 | 谁读谁写 |
 |---|---|---|
 | **书写契约**（方言） | workflow `.js` 文件 | 作者（人或 agent）写，loader 翻译，引擎执行 |
-| **观测契约** | run 目录（7 个文件 + 9 种事件） | worker 写，任何观察者读 |
+| **观测契约** | run 目录（7 个基本文件 + 可选启动记录 + 9 种事件） | worker/launcher 写，任何观察者读 |
 | **控制契约** | `odw` CLI（run/status/logs/pause/stop…） | 调用方驱动 |
 
 方言的语法**就是标准 JavaScript**（非 TS）。"方言"体现在三条约定：`export const meta` 字面量、8 个注入全局、顶层 `await`/`return` 合法。除此之外没有任何私有语法。
@@ -75,7 +75,8 @@ loader 是唯一的"翻译"发生地，做三件事：
 
 - 并发帽：同时至多 N 个 agent 子进程，默认 `min(16, cpus − 2)`（config `concurrency` 可覆盖）。槽位释放时直接交给下一个等待者，不存在超订窗口。
 - 总量保险丝：每 run 至多 `maxAgents: 1000` 次派发，防失控循环；触发即 fatal。
-- 检查顺序：每次派发前先查预算、再查保险丝、再过 `checkpoint()`（见 2.2）。
+- 检查顺序（2026-09-07 修正）：先取得并发槽位,再过 `checkpoint()`（见 2.2）、查预算、查保险丝,
+  最后计入派发数并启动 agent。排队期间发生的停止、暂停或预算变化会在这里生效;检查失败也释放槽位。
 - `agent_started` 事件在**拿到真实调度槽后**才发——排队中的工作不会被展示成"运行中"。
 
 ### 2.2 控制（pause / resume / stop）
@@ -108,12 +109,16 @@ adapter = 一条命令模板（数组），如 `["codex", "exec", "--cd", "{work
   error.json     失败时的 message + stack
   control.json   CLI 写入的 pause/resume/stop 请求
   worker.log     worker 进程的 stdout/stderr
+  worker.pid     可选：launcher 启动后写一次的正整数 PID（2026-09-07 新增）
 ```
 
 - `runId` 全局唯一，是对外的唯一 handle（按 id 找 run 不依赖桶路径；兼容旧的扁平目录）。
 - 所有 JSON 写入原子化（临时文件 + rename），并发读者不会读到半个文件。
 - 终态集合 `{done, failed, stopped}`：进入后不再变化。
 - 内联脚本发起的 run 把源码物化为 run 目录内的 `workflow.js`——**run 目录自包含**，事后可完整复现"当时跑的是什么"。
+- `worker.pid` 用于 worker 尚未写 `status.pid` 时的存活检查,避免 launcher 与 worker 同时修改状态文件。
+  `wait`、`logs --follow`、`attach` 共用检查:进程已退出则及时非零返回,观察者不改写历史状态。
+  旧记录仍可读取;缺少 PID 时保留启动宽限,已知存活的进程不会因暂时没有输出而被判为失败。
 
 事件共 **9 种**，形状 `{ts, type, ...fields}`（`ts` 为秒、浮点、墙钟——事件只供观察、永不回流控制，故不违反确定性）：
 

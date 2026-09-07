@@ -11,7 +11,7 @@ Claude Code 自带 Workflow 工具同一方言,外加一个实时观测每次运
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/Node-%E2%89%A520-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6?logo=typescript&logoColor=white)](tsconfig.json)
-[![tests](https://img.shields.io/badge/tests-275%20passing-brightgreen.svg)](tests)
+[![tests](https://github.com/xz1220/open-dynamic-workflows/actions/workflows/ci.yml/badge.svg)](https://github.com/xz1220/open-dynamic-workflows/actions/workflows/ci.yml)
 [![runtime deps](https://img.shields.io/badge/runtime%20deps-0-blue.svg)](package.json)
 
 [English](README.md) · [简体中文](README.zh-CN.md)
@@ -113,7 +113,9 @@ curl -fsSL https://raw.githubusercontent.com/xz1220/open-dynamic-workflows/main/
 
 自动下对应平台的预编译二进制(gzip,约 35 MB)到 `~/.local/bin/odw`,并把 skill 装进
 `~/.claude/skills/`(没有就退到 `~/.codex/skills/`)。无需 Node。可用环境变量
-`ODW_BIN_DIR` / `ODW_VERSION` 覆盖。
+`ODW_BIN_DIR` 指定目录,或用 `ODW_VERSION=v0.4.0` 固定版本。`latest` 会先解析成一个
+确定的发布版本,二进制和 skill 都从该版本下载。所有下载与新二进制验证成功后才替换现有
+安装;替换失败会恢复旧文件。自定义部署可用 `ODW_REF` 显式指定 skill 的来源,默认与二进制一致。
 
 ### 3. 手动安装
 
@@ -125,9 +127,12 @@ curl -fsSL https://raw.githubusercontent.com/xz1220/open-dynamic-workflows/main/
 gunzip odw-darwin-arm64.gz && chmod +x odw-darwin-arm64
 mv odw-darwin-arm64 ~/.local/bin/odw
 
-# b) skill —— 把 skills/open-dynamic-workflows/ 拷进 agent 的 skills 目录
-git clone https://github.com/xz1220/open-dynamic-workflows.git
-cp -r open-dynamic-workflows/skills/open-dynamic-workflows ~/.claude/skills/open-dynamic-workflows
+# b) skill 必须取同一发布版本（改成上面下载的版本）
+ODW_TAG=v0.4.0
+git clone --branch "$ODW_TAG" https://github.com/xz1220/open-dynamic-workflows.git
+skill_source=open-dynamic-workflows/skills/open-dynamic-workflows
+[ -d "$skill_source" ] || skill_source=open-dynamic-workflows/skill
+cp -r "$skill_source" ~/.claude/skills/open-dynamic-workflows
 ```
 
 或者,**等 `odw` 发布到 npm 之后**(目前还没有——见 [开发](#开发))、且你有 Node ≥20,
@@ -138,6 +143,9 @@ cp -r open-dynamic-workflows/skills/open-dynamic-workflows ~/.claude/skills/open
 > 另行安装的独立 CLI。
 
 ## 快速开始
+
+本文描述当前源码。使用正式安装包时,以配套 skill 和 `odw --help` 为准;
+需要尚未发布的功能,可按[开发](#开发)中的步骤从源码构建。
 
 只装了一个 CLI(只有 `claude` 或只有 `codex`)?零配置,直接往下看。装了好几个?安装器
 已经让你选过默认了;`odw init` 随时可以重选(agent 则在问过你之后用
@@ -398,11 +406,21 @@ workflow 脚本始终是**纯 `.js`**、从不编译;引擎用 **TypeScript** �
 ## 开发
 
 ```bash
+npm ci                # 安装锁定版本的构建依赖
 npm run build         # tsc → dist/
 npm test              # node:test 测试套件,由 mock 适配器驱动(无需真实账号)
 npm run typecheck     # tsc --noEmit
 npm run build:binary  # 打包 + Node SEA + postject → 单个自包含的 ./build/odw
 ```
+
+更新本地源码安装时,先构建更新后的目录,再运行 `npm install -g .`,并将同目录的
+`skills/open-dynamic-workflows/` 复制到 agent 的技能目录。已经通过 npm 链接到源码的安装,
+会直接使用重新构建的 `dist/`。
+
+版本以 `package.json` 为准。源码构建显示 `0.5.0-dev+g<修订号>`,有未保存修改时附加
+`.dirty`;不含 Git 记录的源码包显示 `0.5.0-dev+source`。构建或测试前会生成内嵌版本信息。
+正式构建设置 `ODW_RELEASE_TAG=v0.5.0`,要求当前源码正好对应该版本、没有未保存修改,
+包版本与锁文件一致,测试和类型检查通过,且二进制报告预期版本。所有平台构建成功后才发布。
 
 `build:binary` 走的是标准的单二进制配方:[esbuild](https://esbuild.github.io/) 把
 `dist/`(零依赖 ESM)打包成一个 CommonJS 文件,`node --experimental-sea-config` 生成
@@ -416,6 +434,9 @@ npm run build:binary  # 打包 + Node SEA + postject → 单个自包含的 ./bu
 > 发布后,`npm i -g odw`(或 `npx odw …`)会把 `odw` 命令装到你的 PATH 上。
 
 ## 状态
+
+**0.5.0 开发版：**排队任务在真正启动前重新检查暂停、停止和预算;等待命令能识别后台进程
+已退出。升级时二进制与 skill 固定同一版本,替换失败恢复旧文件;源码构建显示具体修订号。
 
 **最新(`main` 上,未发版):**在交互式终端里,`odw run` 现在会直接挂上**前台实时视图**
 ——Ctrl-C 只脱离不杀任务,`odw attach` 随时挂回,管道/CI 下仍保持先拿 run id 再轮询的
@@ -433,8 +454,9 @@ npm run build:binary  # 打包 + Node SEA + postject → 单个自包含的 ./bu
 [Releases](https://github.com/xz1220/open-dynamic-workflows/releases)。
 
 **核心运行时已交付。** 完整运行时已在 `main` 上——适配层、执行桥接、工作区隔离、异步调度器、
-注入原语、loader/transform、JSON-Schema 引擎、后台运行时,以及 `odw` CLI。**275 个测试
-通过**,旗舰示例 [`examples/deep-research.js`](examples/deep-research.js) 端到端跑通
+注入原语、loader/transform、JSON-Schema 引擎、后台运行时,以及 `odw` CLI。回归测试由
+[CI](https://github.com/xz1220/open-dynamic-workflows/actions/workflows/ci.yml) 持续检查,
+旗舰示例 [`examples/deep-research.js`](examples/deep-research.js) 端到端跑通
 (plan → search → extract → vote → report)。
 
 ### 路线图(v1.5+)

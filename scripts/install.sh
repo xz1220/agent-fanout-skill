@@ -8,13 +8,13 @@
 #   curl -fsSL https://raw.githubusercontent.com/xz1220/open-dynamic-workflows/main/scripts/install.sh | sh
 #
 # Env overrides: ODW_VERSION (default: latest), ODW_BIN_DIR (default: ~/.local/bin),
-#                ODW_REF (skill source ref, default: main).
+#                ODW_REF (skill source ref, default: the binary's release tag).
 set -eu
 
 REPO="xz1220/open-dynamic-workflows"
 VERSION="${ODW_VERSION:-latest}"
-REF="${ODW_REF:-main}"
 BIN_DIR="${ODW_BIN_DIR:-$HOME/.local/bin}"
+case "$BIN_DIR" in /*) ;; *) BIN_DIR="$(pwd)/$BIN_DIR" ;; esac
 
 # --- pick the right binary for this machine ---------------------------------
 os="$(uname -s)"; arch="$(uname -m)"
@@ -49,23 +49,70 @@ case "$VERSION" in
 esac
 
 if [ "$VERSION" = "latest" ]; then
-  BASE="https://github.com/$REPO/releases/latest/download"
-else
-  BASE="https://github.com/$REPO/releases/download/$VERSION"
+  # Resolve once: a new release during installation must not mix versions.
+  # Reading curl's final URL avoids requiring a JSON parser or Node.js.
+  RELEASE_URL="$(curl -fsSL -o /dev/null -w '%{url_effective}' "https://github.com/$REPO/releases/latest")"
+  case "$RELEASE_URL" in
+    "https://github.com/$REPO/releases/tag/"*) VERSION="${RELEASE_URL#"https://github.com/$REPO/releases/tag/"}" ;;
+    *) echo "Could not resolve the latest release tag: $RELEASE_URL" >&2; exit 1 ;;
+  esac
 fi
+case "$VERSION" in
+  v[0-9]*) ;;
+  *) echo "Invalid release version: $VERSION" >&2; exit 1 ;;
+esac
+case "$VERSION" in
+  *[!A-Za-z0-9.+-]*) echo "Invalid release version: $VERSION" >&2; exit 1 ;;
+esac
+BASE="https://github.com/$REPO/releases/download/$VERSION"
+REF="${ODW_REF:-$VERSION}"
 
-# Stage downloads in a temp dir and move into place only when complete, so a
-# failed/interrupted download never clobbers a working install.
+# Download and validate everything before touching either installed component.
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+BIN_STAGE=""
+SKILL_STAGE=""
+COMMITTED=0
 
-# --- the binary (download compressed, decompress, then move into place) ------
+# Backups are renamed entries, preserving symlinks/wrappers without following
+# their targets. If recovery itself fails, retain the backup for manual recovery.
+restore_entry() {
+  [ -n "$1" ] || return 0
+  if [ -e "$1/old" ] || [ -L "$1/old" ]; then
+    rm -rf "$2" && mv "$1/old" "$2"
+  elif [ -f "$1/absent" ]; then
+    rm -rf "$2"
+  fi
+}
+cleanup() {
+  INSTALL_STATUS=$?
+  trap - 0 HUP INT TERM
+  set +e
+  RECOVERED=1
+  if [ "$COMMITTED" = 0 ]; then
+    restore_entry "$SKILL_STAGE" "${SKILL_DIR:-}" || RECOVERED=0
+    restore_entry "$BIN_STAGE" "$BIN_DIR/odw" || RECOVERED=0
+  fi
+  if [ "$RECOVERED" = 1 ]; then
+    [ -z "$BIN_STAGE" ] || rm -rf "$BIN_STAGE"
+    [ -z "$SKILL_STAGE" ] || rm -rf "$SKILL_STAGE"
+  else
+    echo "Upgrade failed; could not restore all files. Backups retained at:" >&2
+    printf '  %s\n' "$BIN_STAGE" "$SKILL_STAGE" >&2
+    INSTALL_STATUS=1
+  fi
+  rm -rf "$TMP"
+  exit "$INSTALL_STATUS"
+}
+trap cleanup 0
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+# --- stage the binary -------------------------------------------------------
 echo "→ downloading $ASSET ($VERSION)"
-mkdir -p "$BIN_DIR"
 curl -fSL "$BASE/$ASSET" -o "$TMP/odw.gz"
 gzip -dc "$TMP/odw.gz" > "$TMP/odw"
 chmod +x "$TMP/odw"
-mv -f "$TMP/odw" "$BIN_DIR/odw"
 
 # --- the skill (into Claude Code's skills dir, else Codex's) -----------------
 SKILL_DIR="$HOME/.claude/skills/open-dynamic-workflows"
@@ -77,20 +124,77 @@ if [ ! -d "$HOME/.claude" ]; then
     echo "        your agent will pick it up once it reads that skills directory" >&2
   fi
 fi
-echo "→ installing skill → $SKILL_DIR"
+echo "→ downloading skill ($REF) → $SKILL_DIR"
 mkdir -p "$TMP/open-dynamic-workflows/references"
 RAW="https://raw.githubusercontent.com/$REPO/$REF/skills/open-dynamic-workflows"
-curl -fSL "$RAW/SKILL.md"                 -o "$TMP/open-dynamic-workflows/SKILL.md"
+# Releases through v0.4.0 used skill/, before packages were consolidated. Only
+# a missing entrypoint selects that layout; transport failures must still fail.
+if SKILL_HTTP="$(curl -fSL -w '%{http_code}' "$RAW/SKILL.md" -o "$TMP/open-dynamic-workflows/SKILL.md")"; then
+  :
+elif [ "$SKILL_HTTP" = 404 ]; then
+  RAW="https://raw.githubusercontent.com/$REPO/$REF/skill"
+  curl -fSL "$RAW/SKILL.md" -o "$TMP/open-dynamic-workflows/SKILL.md"
+else
+  echo "Could not download skill entrypoint ($REF)" >&2; exit 1
+fi
 curl -fSL "$RAW/references/primitives.md" -o "$TMP/open-dynamic-workflows/references/primitives.md"
 curl -fSL "$RAW/references/adapters.md"   -o "$TMP/open-dynamic-workflows/references/adapters.md"
-mkdir -p "$SKILL_DIR/references"
-mv -f "$TMP/open-dynamic-workflows/SKILL.md" "$SKILL_DIR/SKILL.md"
-mv -f "$TMP/open-dynamic-workflows/references/primitives.md" "$SKILL_DIR/references/primitives.md"
-mv -f "$TMP/open-dynamic-workflows/references/adapters.md" "$SKILL_DIR/references/adapters.md"
+for DOC in SKILL.md references/primitives.md references/adapters.md; do
+  [ -s "$TMP/open-dynamic-workflows/$DOC" ] || { echo "Downloaded an empty skill file: $DOC" >&2; exit 1; }
+done
 
-# A checked assignment: a binary that cannot run on this machine must abort the
-# install loudly here, not slip past inside an echo's command substitution.
-ODW_VER="$("$BIN_DIR/odw" --version)"
+ODW_VER="$("$TMP/odw" --version)"
+case "$ODW_VER" in
+  "open-dynamic-workflows ${VERSION#v}"|"open-dynamic-workflows ${VERSION#v}+"*) ;;
+  *) echo "Downloaded binary reports '$ODW_VER'; expected ${VERSION#v}" >&2; exit 1 ;;
+esac
+HELP_OUT="$("$TMP/odw" --help)"
+
+# Prepare replacements on each destination filesystem, so every mv is a
+# rename. Copy the existing skill first to retain custom files. Dereference
+# only its root and references directory; replace owned file symlinks in the
+# copy, never writing through links into an existing installation.
+mkdir -p "$BIN_DIR" "$(dirname "$SKILL_DIR")"
+BIN_STAGE="$(mktemp -d "$BIN_DIR/.odw-install.XXXXXX")"
+SKILL_STAGE="$(mktemp -d "$(dirname "$SKILL_DIR")/.odw-install.XXXXXX")"
+if [ -d "$BIN_DIR/odw" ] && [ ! -L "$BIN_DIR/odw" ]; then
+  echo "Refusing to replace a directory: $BIN_DIR/odw" >&2; exit 1
+fi
+cp -p "$TMP/odw" "$BIN_STAGE/new"
+mkdir "$SKILL_STAGE/new"
+if [ -d "$SKILL_DIR" ]; then
+  cp -pRP "$SKILL_DIR/." "$SKILL_STAGE/new"
+elif [ -e "$SKILL_DIR" ] && [ ! -L "$SKILL_DIR" ]; then
+  echo "Expected a skill directory: $SKILL_DIR" >&2; exit 1
+fi
+chmod u+rwx "$SKILL_STAGE/new"
+if [ -L "$SKILL_STAGE/new/references" ]; then
+  rm "$SKILL_STAGE/new/references"
+  mkdir "$SKILL_STAGE/new/references"
+  if [ -d "$SKILL_DIR/references" ]; then
+    cp -pRP "$SKILL_DIR/references/." "$SKILL_STAGE/new/references"
+  fi
+else
+  mkdir -p "$SKILL_STAGE/new/references"
+fi
+chmod u+rwx "$SKILL_STAGE/new/references"
+for DOC in SKILL.md references/primitives.md references/adapters.md; do
+  rm -f "$SKILL_STAGE/new/$DOC"
+  cp "$TMP/open-dynamic-workflows/$DOC" "$SKILL_STAGE/new/$DOC"
+done
+
+replace_entry() {
+  if [ -e "$2" ] || [ -L "$2" ]; then
+    mv "$2" "$1/old"
+  else
+    : > "$1/absent"
+  fi
+  mv "$1/new" "$2"
+}
+replace_entry "$BIN_STAGE" "$BIN_DIR/odw"
+replace_entry "$SKILL_STAGE" "$SKILL_DIR"
+COMMITTED=1
+
 echo "✓ installed $ODW_VER"
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;
@@ -109,27 +213,25 @@ esac
 # init degrades to a report telling the agent to ask its user and run
 # `odw init --adapter <name>`. The --help probe skips all of this when
 # ODW_VERSION pins a release that predates `odw init`.
-if HELP_OUT="$("$BIN_DIR/odw" --help 2>/dev/null)"; then
-  if printf '%s\n' "$HELP_OUT" | grep -q "odw init"; then
-    echo ""
-    # Interactive only as the terminal's FOREGROUND job: a backgrounded install
-    # (`curl … | sh &`) that read /dev/tty would be stopped cold by SIGTTIN.
-    FG_PGID="$(ps -o tpgid= -p $$ 2>/dev/null | tr -d ' ' || true)"
-    MY_PGID="$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ' || true)"
-    if [ -z "${CI:-}" ] && [ -z "${ODW_DETACH:-}" ] && [ "$FG_PGID" = "$MY_PGID" ] \
-       && ( : </dev/tty ) 2>/dev/null; then
-      "$BIN_DIR/odw" init </dev/tty || true
-    else
-      "$BIN_DIR/odw" init --check || true
-    fi
-  fi   # release predates `odw init`: nothing to run
-else
-  echo "  warning: $BIN_DIR/odw --help failed — the binary may not run on this machine" >&2
-fi
+if printf '%s\n' "$HELP_OUT" | grep -q "odw init"; then
+  echo ""
+  # Interactive only as the terminal's FOREGROUND job: a backgrounded install
+  # (`curl … | sh &`) that read /dev/tty would be stopped cold by SIGTTIN.
+  FG_PGID="$(ps -o tpgid= -p $$ 2>/dev/null | tr -d ' ' || true)"
+  MY_PGID="$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ' || true)"
+  if [ -z "${CI:-}" ] && [ -z "${ODW_DETACH:-}" ] && [ "$FG_PGID" = "$MY_PGID" ] \
+     && ( : </dev/tty ) 2>/dev/null; then
+    "$BIN_DIR/odw" init </dev/tty || true
+  else
+    "$BIN_DIR/odw" init --check || true
+  fi
+fi   # release predates `odw init`: nothing to run
 
 echo ""
 echo "next steps:"
 echo "  odw --version                       # confirm the binary works"
-echo "  odw init                            # (re)pick the default agent, if you skipped it above"
+if printf '%s\n' "$HELP_OUT" | grep -q "odw init"; then
+  echo "  odw init                            # (re)pick the default agent, if you skipped it above"
+fi
 echo "  odw run <workflow.js> --wait        # run your first workflow"
 echo "  or just ask your agent: \"use Open Dynamic Workflows to …\" — it picked up the skill"

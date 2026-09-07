@@ -80,6 +80,22 @@ export interface RunRef {
   workflowName: string | null;
 }
 
+/** Optional fingerprints also identify rewrites when a filesystem reuses an inode. */
+export interface EventsCursor {
+  offset: number;
+  ino?: number;
+  prefix?: string;
+  boundary?: string;
+}
+
+const CURSOR_WINDOW_BYTES = 128;
+
+function readWindow(fd: number, start: number, length: number): string {
+  const buf = Buffer.alloc(length);
+  const count = readSync(fd, buf, 0, length, start);
+  return buf.subarray(0, count).toString("base64");
+}
+
 export class RunStore {
   /** runId → its directory, primed on create/list so reads avoid a bucket scan. */
   private readonly dirCache = new Map<string, string>();
@@ -197,15 +213,16 @@ export class RunStore {
    * `cursor` and the cursor to pass next time. The cursor only ever advances to
    * a byte offset just past a complete `\n`-terminated line, so a torn tail
    * (mid-append) is simply left for the next poll and a multi-byte character
-   * can never be split. Two replacement guards reset the cursor to 0 instead of
-   * misreading: a file smaller than the cursor (truncated in place), and a
-   * changed inode (replaced wholesale — even one that already grew past the old
-   * offset, which a size check alone would silently read from the middle of).
+   * can never be split. Size, inode, and fixed windows of previously consumed
+   * bytes guard log rotation. Inodes can be reused immediately, so changed
+   * prefix/boundary bytes also reset the cursor. These bounded checks assume an
+   * append-only log; they are not an integrity check for arbitrary middle edits.
+   * Window validation reads at most 256 old bytes, not the whole growing log.
    */
   readEventsSince(
     runId: string,
-    cursor: { offset: number; ino?: number },
-  ): { events: WorkflowEvent[]; cursor: { offset: number; ino?: number } } {
+    cursor: EventsCursor,
+  ): { events: WorkflowEvent[]; cursor: EventsCursor } {
     const path = this.eventsPath(runId);
     let fd: number;
     try {
@@ -217,13 +234,27 @@ export class RunStore {
       const stat = fstatSync(fd);
       const size = stat.size;
       const sameFile = cursor.ino === undefined || cursor.ino === stat.ino;
-      const offset = !sameFile || size < cursor.offset ? 0 : cursor.offset;
-      if (size === offset) return { events: [], cursor: { offset, ino: stat.ino } };
+      const windowSize = Math.min(cursor.offset, CURSOR_WINDOW_BYTES);
+      const unchanged = sameFile && size >= cursor.offset &&
+        (cursor.prefix === undefined || readWindow(fd, 0, windowSize) === cursor.prefix) &&
+        (cursor.boundary === undefined ||
+          readWindow(fd, cursor.offset - windowSize, windowSize) === cursor.boundary);
+      const offset = unchanged ? cursor.offset : 0;
+      const nextCursor = (nextOffset: number): EventsCursor => {
+        const length = Math.min(nextOffset, CURSOR_WINDOW_BYTES);
+        return {
+          offset: nextOffset,
+          ino: stat.ino,
+          prefix: readWindow(fd, 0, length),
+          boundary: readWindow(fd, nextOffset - length, length),
+        };
+      };
+      if (size === offset) return { events: [], cursor: nextCursor(offset) };
       const buf = Buffer.alloc(size - offset);
       const read = readSync(fd, buf, 0, buf.length, offset);
       const chunk = buf.subarray(0, read);
       const lastNl = chunk.lastIndexOf(0x0a);
-      if (lastNl === -1) return { events: [], cursor: { offset, ino: stat.ino } }; // torn tail only
+      if (lastNl === -1) return { events: [], cursor: nextCursor(offset) }; // torn tail only
       const events: WorkflowEvent[] = [];
       for (const line of chunk.subarray(0, lastNl + 1).toString("utf8").split("\n")) {
         const trimmed = line.trim();
@@ -234,7 +265,7 @@ export class RunStore {
           // Complete but unparsable line — skip it, same tolerance as readEvents.
         }
       }
-      return { events, cursor: { offset: offset + lastNl + 1, ino: stat.ino } };
+      return { events, cursor: nextCursor(offset + lastNl + 1) };
     } finally {
       closeSync(fd);
     }

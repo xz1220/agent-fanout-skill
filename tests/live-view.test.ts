@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -118,8 +118,8 @@ test("readEventsSince: a REPLACED file that outgrew the old offset is re-read fr
   appendFileSync(path, JSON.stringify({ ts: 1, type: "run_started" }) + "\n");
   let cur = store.readEventsSince(runId, { offset: 0 }).cursor;
 
-  // Replace the file wholesale (new inode) with MORE bytes than the old offset:
-  // a size-only check would silently read from the middle of the new file.
+  // Replace the file with MORE bytes than the old offset. The filesystem may
+  // immediately reuse its inode; either way we must read from the beginning.
   rmSync(path);
   const lines = [
     JSON.stringify({ ts: 10, type: "run_started" }),
@@ -131,6 +131,76 @@ test("readEventsSince: a REPLACED file that outgrew the old offset is re-read fr
     r.events.map((e) => e.ts),
     [10, 11],
   );
+});
+
+test("readEventsSince detects replacement even when its inode is reused", () => {
+  const store = freshStore();
+  try {
+    const runId = makeRun(store);
+    const path = store.eventsPath(runId);
+    writeFileSync(path, JSON.stringify({ ts: 1, type: "run_started" }) + "\n");
+    const cursor = store.readEventsSince(runId, { offset: 0 }).cursor;
+    rmSync(path);
+    writeFileSync(path, [
+      JSON.stringify({ ts: 10, type: "run_started" }),
+      JSON.stringify({ ts: 11, type: "log", message: "replacement longer than the old offset" }),
+    ].join("\n") + "\n");
+    // Force the inode comparison to pass independently of the host filesystem.
+    const reused = { ...cursor, ino: statSync(path).ino };
+    const read = store.readEventsSince(runId, reused);
+    assert.deepEqual(read.events.map((ev) => ev.ts), [10, 11]);
+    assert.deepEqual(store.readEventsSince(runId, read.cursor).events, []);
+  } finally {
+    rmSync(store.root, { recursive: true, force: true });
+  }
+});
+
+test("readEventsSince checks the consumed boundary for same-size rewrites with a shared prefix", () => {
+  const store = freshStore();
+  try {
+    const runId = makeRun(store);
+    const path = store.eventsPath(runId);
+    const prefix = JSON.stringify({ ts: 1, type: "log", message: "common-prefix".repeat(100) }) + "\n";
+    const before = prefix + JSON.stringify({ ts: 2, type: "log", message: "old".repeat(100) }) + "\n";
+    const after = prefix + JSON.stringify({ ts: 3, type: "log", message: "new".repeat(100) }) + "\n";
+    assert.equal(Buffer.byteLength(before), Buffer.byteLength(after));
+    writeFileSync(path, before);
+    const cursor = store.readEventsSince(runId, { offset: 0 }).cursor;
+    writeFileSync(path, after); // O_TRUNC retains the inode.
+    assert.equal(statSync(path).ino, cursor.ino);
+    const read = store.readEventsSince(runId, cursor);
+    assert.deepEqual(read.events.map((ev) => ev.ts), [1, 3]);
+    assert.deepEqual(store.readEventsSince(runId, read.cursor).events, []);
+    appendFileSync(path, JSON.stringify({ ts: 4, type: "log", message: "append" }) + "\n");
+    assert.deepEqual(store.readEventsSince(runId, read.cursor).events.map((ev) => ev.ts), [4]);
+  } finally {
+    rmSync(store.root, { recursive: true, force: true });
+  }
+});
+
+test("readEventsSince fingerprints stay bounded and do not consume torn UTF-8 appends", () => {
+  const store = freshStore();
+  try {
+    const runId = makeRun(store);
+    const path = store.eventsPath(runId);
+    writeFileSync(path, JSON.stringify({ ts: 1, type: "log", message: "large".repeat(100_000) }) + "\n");
+    const cursor = store.readEventsSince(runId, { offset: 0 }).cursor;
+    assert.ok(Buffer.from(cursor.prefix!, "base64").length <= 128);
+    assert.ok(Buffer.from(cursor.boundary!, "base64").length <= 128);
+    const line = Buffer.from(JSON.stringify({ ts: 2, type: "log", message: "中文" }) + "\n");
+    const split = line.indexOf(Buffer.from("中")) + 1;
+    appendFileSync(path, line.subarray(0, split));
+    const torn = store.readEventsSince(runId, cursor);
+    assert.deepEqual(torn.events, []);
+    assert.equal(torn.cursor.offset, cursor.offset);
+    appendFileSync(path, line.subarray(split));
+    const complete = store.readEventsSince(runId, torn.cursor);
+    assert.equal(complete.events.length, 1);
+    assert.equal(complete.events[0]!.message, "中文");
+    assert.deepEqual(store.readEventsSince(runId, complete.cursor).events, []);
+  } finally {
+    rmSync(store.root, { recursive: true, force: true });
+  }
 });
 
 // --- live attach: happy path ----------------------------------------------------------

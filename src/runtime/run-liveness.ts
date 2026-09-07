@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import type { WorkflowEvent } from "../events.js";
-import { RunStore, TERMINAL_STATES } from "./run-store.js";
+import { RunStore, TERMINAL_STATES, type EventsCursor } from "./run-store.js";
 import { isProcessAlive } from "./runs-view.js";
 
 export interface RunObservation {
@@ -16,7 +16,7 @@ export interface RunObservation {
 }
 
 export class RunObserver {
-  private cursor: { offset: number; ino?: number } = { offset: 0 };
+  private cursor: EventsCursor = { offset: 0 };
   private terminalEvent: { at: number; state: string; error?: string } | null = null;
   private emptyStatusSince: number | null = null;
   private readonly startedAt: number;

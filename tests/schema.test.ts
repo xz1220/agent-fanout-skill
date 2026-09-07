@@ -54,3 +54,40 @@ test("describeSchema mentions JSON and embeds the schema", () => {
   assert.match(text, /JSON/);
   assert.match(text, /"type": "object"/);
 });
+
+// These cases document the current portability boundary, not full JSON Schema
+// conformance. An ignored constraint must not be mistaken for a validated one.
+for (const [keyword, constraint] of Object.entries({
+  const: { const: "approved" },
+  $ref: { $ref: "#/$defs/approved", $defs: { approved: { enum: ["approved"] } } },
+  oneOf: { oneOf: [{ enum: ["approved"] }, { enum: ["denied"] }] },
+})) {
+  test(`validate: unsupported ${keyword} is ignored while a string type still applies`, () => {
+    const schema = { type: "string", ...constraint };
+    assert.deepEqual(validate("neither", schema), [], `${keyword} is not enforced`);
+    assert.ok(validate(42, schema).some((problem) => /expected string/.test(problem)));
+  });
+}
+
+test("validate: type union arrays are outside the supported single-type subset", () => {
+  assert.ok(validate(null, { type: ["string", "null"] }).some((problem) => /unknown schema type/.test(problem)));
+  assert.deepEqual(validate(null, { type: "null" }), []);
+});
+
+test("validate: object and array constraints require their explicit type", () => {
+  const objectConstraints = { required: ["name"] };
+  assert.deepEqual(validate({}, objectConstraints), []);
+  assert.ok(validate({}, { type: "object", ...objectConstraints }).some((problem) => /name.*missing/.test(problem)));
+
+  const arrayConstraints = { items: { type: "string" }, minItems: 2 };
+  assert.deepEqual(validate([1], arrayConstraints), []);
+  const problems = validate([1], { type: "array", ...arrayConstraints });
+  assert.ok(problems.some((problem) => /expected string/.test(problem)));
+  assert.ok(problems.some((problem) => /at least 2/.test(problem)));
+});
+
+test("validate: additionalProperties false is enforced but a schema value is not", () => {
+  assert.deepEqual(validate({ extra: 42 }, { type: "object", additionalProperties: { type: "string" } }), []);
+  assert.ok(validate({ extra: 42 }, { type: "object", additionalProperties: false })
+    .some((problem) => /unexpected properties/.test(problem)));
+});

@@ -3,6 +3,7 @@ node_modules/
 dist/
 build/
 *.tsbuildinfo
+src/version.generated.ts
 npm-debug.log*
 
 # Local run state (background workers persist runs under here by default)

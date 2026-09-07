@@ -1,0 +1,2 @@
+# Keep embedded HTML/skill strings byte-identical across release runners.
+* text=auto eol=lf

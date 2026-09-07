@@ -26,8 +26,10 @@ import { chmodSync, copyFileSync, mkdirSync, readFileSync, rmSync, statSync, wri
 import { join } from "node:path";
 import { execPath, platform } from "node:process";
 import { fileURLToPath } from "node:url";
+import { buildVersion, verifyVersionOutput } from "./version-info.mjs";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
+const expectedVersion = buildVersion(new URL("../", import.meta.url), process.env.ODW_RELEASE_TAG || "").version;
 const buildDir = join(root, "build");
 const bundle = join(buildDir, "odw.cjs");
 const blob = join(buildDir, "odw.blob");
@@ -95,5 +97,6 @@ chmodSync(out, 0o755);
 // 5. verify it launches
 step(5, "verifying the binary runs");
 const version = execFileSync(out, ["--version"], { encoding: "utf8" }).trim();
+verifyVersionOutput(version, expectedVersion);
 const sizeMB = (statSync(out).size / 1024 / 1024).toFixed(1);
 console.error(`\x1b[32m✓\x1b[0m built ${out}  (${sizeMB} MB)  →  ${version}`);

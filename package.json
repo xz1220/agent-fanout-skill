@@ -1,6 +1,6 @@
 {
   "name": "odw",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Open Dynamic Workflows: a TypeScript CLI runtime for Claude Code-style dynamic workflows across any coding-agent CLI.",
   "type": "module",
   "bin": {
@@ -25,16 +25,17 @@
   },
   "scripts": {
     "build:web": "node web/build.mjs",
-    "embed": "node scripts/embed-dashboard.mjs && node scripts/embed-skill.mjs",
+    "embed": "node scripts/embed-dashboard.mjs && node scripts/embed-skill.mjs && node scripts/generate-version.mjs",
     "prebuild": "npm run build:web && npm run embed",
     "build": "tsc -p tsconfig.json",
     "build:binary": "npm run build && node scripts/build-binary.mjs",
-    "dev": "tsx src/cli.ts",
-    "serve": "tsx src/cli.ts serve --open",
+    "dev": "node scripts/generate-version.mjs && tsx src/cli.ts",
+    "serve": "node scripts/generate-version.mjs && tsx src/cli.ts serve --open",
     "pretypecheck": "npm run embed",
     "test": "tsx --test tests/*.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "pretest": "node scripts/generate-version.mjs"
   },
   "workspaces": [
     "web"

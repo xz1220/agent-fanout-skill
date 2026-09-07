@@ -12,7 +12,7 @@
  * the usual front door.
  */
 
-export const VERSION = "0.4.0";
+export { VERSION, BUILD_INFO } from "./version.generated.js";
 
 // Errors & events
 export * from "./errors.js";

@@ -38,8 +38,9 @@ import {
   type Palette,
   type TermCaps,
 } from "../tty.js";
+import { RunObserver } from "./run-liveness.js";
 import { RunStore, TERMINAL_STATES } from "./run-store.js";
-import { applyAgentEvent, isProcessAlive, type AgentView } from "./runs-view.js";
+import { applyAgentEvent, type AgentView } from "./runs-view.js";
 
 // --- mode resolution -----------------------------------------------------------
 
@@ -402,9 +403,7 @@ export async function attachRun(
     view.header();
   }
 
-  let cur: { offset: number; ino?: number } = { offset: 0 };
-  let terminalEvent: { at: number; state: string } | null = null;
-  let emptyStatusSince: number | null = null;
+  const observer = new RunObserver(store, runId, now);
 
   const finishLine = (code: number, cleanup: () => void): number => {
     cleanup();
@@ -416,83 +415,23 @@ export async function attachRun(
   };
 
   try {
-    for (let frame = 0; ; frame++) {
-      const read = store.readEventsSince(runId, cur);
-      cur = read.cursor;
-      if (view) view.applyEvents(read.events);
+    for (;;) {
+      const observed = observer.read();
+      if (view) view.applyEvents(observed.events);
       else {
-        for (const ev of read.events) opts.err.write(formatEvent(ev) + "\n");
+        for (const ev of observed.events) opts.err.write(formatEvent(ev) + "\n");
       }
-      for (const ev of read.events) {
-        if (ev.type === "run_finished") terminalEvent = { at: now(), state: "done" };
-        else if (ev.type === "run_failed") terminalEvent = { at: now(), state: "failed" };
-        else if (ev.type === "run_stopped") terminalEvent = { at: now(), state: "stopped" };
-      }
-
-      const status = store.readStatus(runId);
+      const status = observed.status;
       const state = String(status.state ?? "");
       const control = store.readControl(runId);
-
-      // Terminal status is authoritative…
-      if (TERMINAL_STATES.has(state)) {
-        // Drain events that landed between this frame's event read and the
-        // status flip, so every agent settles in the scrollback before the
-        // verdict line.
-        const tail = store.readEventsSince(runId, cur);
-        cur = tail.cursor;
-        if (view) view.applyEvents(tail.events);
-        else for (const ev of tail.events) opts.err.write(formatEvent(ev) + "\n");
+      const note = observed.error ?? observed.note;
+      if (note) {
+        if (view) view.note(note);
+        else opts.err.write(note + "\n");
+      }
+      if (observed.error) return finishLine(1, cleanup);
+      if (observed.terminal) {
         return finishLine(await settle(store, runId, state, status, view, opts), cleanup);
-      }
-      // …but a terminal EVENT with a status that never catches up (worker died
-      // between the two writes) must not hang the observer forever. Infer the
-      // state the event itself declared — a run_finished still settles as done
-      // and prints its result.
-      if (terminalEvent !== null && now() - terminalEvent.at > 2000) {
-        const msg = `run ended (${terminalEvent.state}) but its status never settled`;
-        if (view) view.note(msg);
-        else opts.err.write(msg + "\n");
-        return finishLine(await settle(store, runId, terminalEvent.state, status, view, opts), cleanup);
-      }
-
-      // A run directory that vanished (or a status that stays unreadable) must
-      // not spin forever either.
-      if (state === "") {
-        emptyStatusSince ??= now();
-        if (now() - emptyStatusSince > 5000 || !store.exists(runId)) {
-          const msg = `run ${runId} is unreadable (directory removed?)`;
-          if (view) view.note(msg);
-          else opts.err.write(msg + "\n");
-          return finishLine(1, cleanup);
-        }
-      } else {
-        emptyStatusSince = null;
-      }
-
-      // Worker liveness: a kill -9'd worker leaves status "running" forever.
-      if (frame % 16 === 15 && now() - attachStart > 5000) {
-        const pid = typeof status.pid === "number" ? status.pid : null;
-        if (state === "running" || state === "paused") {
-          // pid === null mirrors the dashboard's staleness rule: a live state
-          // that never recorded its worker pid is unverifiable — stale.
-          if (pid === null || isProcessAlive(pid) === false) {
-            const msg =
-              pid === null
-                ? `run reports "${state}" but never recorded a worker pid — treating as stale`
-                : `worker process (pid ${pid}) is gone; the run will not progress`;
-            if (view) view.note(msg);
-            else opts.err.write(msg + "\n");
-            return finishLine(1, cleanup);
-          }
-        }
-        // A spawn that dies before its first status write leaves "pending"
-        // forever; the launcher normally flips to running within milliseconds.
-        if (state === "pending" && now() - attachStart > 10_000) {
-          const msg = "run never started (still pending) — its worker likely failed to spawn";
-          if (view) view.note(msg);
-          else opts.err.write(msg + "\n");
-          return finishLine(1, cleanup);
-        }
       }
 
       if (view) view.repaint(status, control);
@@ -533,7 +472,8 @@ async function settle(
   // (A fresh cursor would re-print everything; reuse is handled by the caller's
   // cursor already being past — we only need the final repaint here.)
   const error = store.readError(runId);
-  const errText = error && typeof error.error === "string" ? error.error : null;
+  const errText = typeof status.error === "string" ? status.error
+    : error && typeof error.error === "string" ? error.error : null;
   if (view) view.finalize(state, status, errText);
 
   if (state === "done") {

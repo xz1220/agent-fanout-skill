@@ -27,6 +27,7 @@ import { VERSION } from "./index.js";
 import { cmdInit } from "./init.js";
 import { startRun, startRunFromSource, waitFor } from "./runtime/launcher.js";
 import { attachRun, formatEvent, resolveRunMode, type RunMode } from "./runtime/live-view.js";
+import { RunObserver } from "./runtime/run-liveness.js";
 import { RunStore, TERMINAL_STATES } from "./runtime/run-store.js";
 import { startServer } from "./runtime/server.js";
 import { executeRun } from "./runtime/worker.js";
@@ -412,13 +413,19 @@ async function cmdLogs(rest: string[]): Promise<number> {
     process.stderr.write(`no such run: ${runId}\n`);
     return 1;
   }
-  let seen = 0;
+  const observer = new RunObserver(store, runId);
   for (;;) {
-    const events = store.readEvents(runId);
-    for (const ev of events.slice(seen)) process.stdout.write(formatEvent(ev) + "\n");
-    seen = events.length;
+    const observed = observer.read();
+    for (const ev of observed.events) process.stdout.write(formatEvent(ev) + "\n");
     if (!values.follow) return 0;
-    if (TERMINAL_STATES.has(store.readStatus(runId).state as string)) return 0;
+    if (observed.note) process.stderr.write(observed.note + "\n");
+    if (observed.error) {
+      process.stderr.write(observed.error + "\n");
+      return 1;
+    }
+    if (observed.terminal) {
+      return observed.status.state === "done" ? 0 : reportTerminal(store, runId, observed.status);
+    }
     await delay(300);
   }
 }
@@ -733,7 +740,7 @@ function reportTerminal(store: RunStore, runId: string, status: Record<string, u
   }
   if (state === "failed") {
     const error = store.readError(runId) ?? {};
-    process.stderr.write(`run failed: ${error.error ?? "unknown error"}\n`);
+    process.stderr.write(`run failed: ${status.error ?? error.error ?? "unknown error"}\n`);
     return 1;
   }
   if (state === "stopped") {

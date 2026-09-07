@@ -8,8 +8,8 @@
  */
 
 import { spawn } from "node:child_process";
-import { closeSync, existsSync, openSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { closeSync, existsSync, openSync, readFileSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { execPath } from "node:process";
 import { fileURLToPath } from "node:url";
 
@@ -18,7 +18,8 @@ import type { Config } from "../adapters/types.js";
 import { loadWorkflowScript } from "../loader.js";
 import { isSeaBinary } from "../sea.js";
 import { resolveWorkflow } from "../workflows/resolve.js";
-import { RunStore, TERMINAL_STATES } from "./run-store.js";
+import { RunObserver } from "./run-liveness.js";
+import { RunStore } from "./run-store.js";
 
 export interface StartRunOptions {
   args?: unknown;
@@ -134,14 +135,31 @@ function spawnWorker(store: RunStore, runId: string, source: string): void {
     ? ["__worker", store.runDir(runId)]
     : nodeWorkerArgv(store.runDir(runId));
   const logFd = openSync(store.logPath(runId), "w");
-  const child = spawn(execPath, workerArgv, {
-    cwd: source,
-    detached: true, // the run outlives this process
-    windowsHide: true,
-    stdio: ["ignore", logFd, logFd],
-  });
-  closeSync(logFd); // the child holds its own dup'd descriptors; don't leak ours
+  const failed = (err: Error) => {
+    store.writeError(runId, { error: `worker failed to start: ${err.message}` });
+    store.updateStatus(runId, { state: "failed" });
+  };
+  let child;
+  try {
+    child = spawn(execPath, workerArgv, {
+      cwd: source,
+      detached: true, // the run outlives this process
+      windowsHide: true,
+      stdio: ["ignore", logFd, logFd],
+    });
+  } catch (err) {
+    failed(err as Error);
+    throw err;
+  } finally {
+    closeSync(logFd); // the child holds its own dup'd descriptors; don't leak ours
+  }
+  child.once("error", failed);
   child.unref();
+  // A separate, write-once file avoids racing the worker's status updates,
+  // and identifies slow-starting workers before their first status write.
+  if (child.pid !== undefined) {
+    writeFileSync(join(store.runDir(runId), "worker.pid"), String(child.pid));
+  }
 }
 
 function nodeWorkerArgv(runDir: string): string[] {
@@ -182,10 +200,12 @@ export async function waitFor(
   // never "wait forever".
   const deadline = options.timeoutMs !== undefined ? Date.now() + options.timeoutMs : null;
   const poll = options.pollIntervalMs ?? 200;
+  const observer = new RunObserver(store, runId);
   for (;;) {
-    const status = store.readStatus(runId);
-    if (TERMINAL_STATES.has(status.state as string)) return status;
-    if (deadline !== null && Date.now() >= deadline) return status;
+    const observed = observer.read();
+    if (observed.terminal) return observed.status;
+    if (observed.error) return { ...observed.status, state: "failed", error: observed.error };
+    if (deadline !== null && Date.now() >= deadline) return observed.status;
     await new Promise<void>((r) => setTimeout(r, poll));
   }
 }

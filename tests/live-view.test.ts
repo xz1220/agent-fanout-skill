@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -368,4 +369,24 @@ test("attachRun: a deleted run directory exits 1 instead of spinning forever", a
   });
   assert.equal(code, 1);
   assert.match(term.text(), /unreadable/);
+});
+
+test("attachRun: a dead worker fails before the timeout and restores the cursor", async () => {
+  const store = freshStore();
+  try {
+    const runId = makeRun(store);
+    const dead = spawnSync(process.execPath, ["-e", "process.exit(0)"]);
+    assert.equal(dead.status, 0);
+    store.updateStatus(runId, { pid: dead.pid });
+    const term = new FakeTerm(80);
+    const code = await attachRun(store, runId, {
+      out: new Collector(), err: term, live: true, signals: false, env: ENV, timeoutMs: 0,
+    });
+    assert.equal(code, 1);
+    assert.match(term.text(), /worker process .* is gone/);
+    assert.doesNotMatch(term.text(), /run continues/);
+    assert.ok(term.raw.endsWith("\x1b[?25h"));
+  } finally {
+    rmSync(store.root, { recursive: true, force: true });
+  }
 });

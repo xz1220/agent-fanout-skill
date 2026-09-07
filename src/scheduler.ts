@@ -26,9 +26,7 @@ export interface SchedulerOptions {
   /**
    * The budget ceiling, run right before the runaway backstop on each dispatch.
    * Throw a fatal error (e.g. {@link BudgetExhausted}) to abort the run when the
-   * token budget is spent. The default is a no-op; in v1 the budget is a stub so
-   * nothing throws, but the seam is here so cost control can land without moving
-   * the dispatch path.
+   * token budget is spent. The default is a no-op for callers without a budget.
    */
   budgetGuard?: () => void;
 }
@@ -56,21 +54,22 @@ export class Scheduler {
 
   /** Run one agent unit under the concurrency cap and total backstop. */
   async runAgent<T>(fn: () => Promise<T>): Promise<T> {
-    await this.checkpoint();
-    // Budget ceiling first: a spent-out run must not dispatch, even if it is
-    // still under the runaway cap. Fatal, so it unwinds the whole run.
-    this.budgetGuard();
-    // Reserve the budget synchronously right after the checkpoint: the
-    // read-and-increment has no await between, so it is atomic on the loop.
-    if (this.dispatchedCount >= this.maxAgents) {
-      throw new AgentLimitExceeded(`run reached its cap of ${this.maxAgents} agent dispatches`);
-    }
-    this.dispatchedCount++;
-
     await this.acquire();
     try {
+      // Control and usage can change while this request waits for a slot.
+      // Check at the actual dispatch boundary; a paused request holds its slot
+      // until resumed or stopped, without starting the agent.
+      await this.checkpoint();
+      this.budgetGuard();
+      // Count actual dispatches, not queued requests. There is no await between
+      // checking the cap, incrementing it, and starting the agent.
+      if (this.dispatchedCount >= this.maxAgents) {
+        throw new AgentLimitExceeded(`run reached its cap of ${this.maxAgents} agent dispatches`);
+      }
+      this.dispatchedCount++;
       return await fn();
     } finally {
+      // Guard failures must also hand the slot to the next queued request.
       this.release();
     }
   }

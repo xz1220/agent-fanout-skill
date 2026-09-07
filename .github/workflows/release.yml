@@ -15,16 +15,34 @@ permissions:
 # Run all JavaScript actions on Node 24 (the Node 20 action runtime is deprecated).
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  ODW_RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
 
 jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+      - run: npm ci
+      # Version generation checks tag, package, lockfile and source revision.
+      - run: npm run build
+      - run: npm run typecheck
+      - run: npm test
+
   binary:
+    needs: verify
     name: ${{ matrix.os }}-${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         # No darwin-x64: GitHub's Intel macOS runners (macos-13) are being retired
-        # and queue indefinitely. Intel-mac users install via npm (see install.sh).
+        # and queue indefinitely. Intel-mac users build from source (see install.sh).
         include:
           - { runner: macos-14,         os: darwin, arch: arm64 }
           - { runner: ubuntu-latest,    os: linux,  arch: x64 }
@@ -32,6 +50,8 @@ jobs:
           - { runner: windows-latest,   os: win,    arch: x64 }
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: "24"
@@ -52,8 +72,20 @@ jobs:
         with:
           name: ${{ env.ASSET }}
           path: ${{ env.ASSET }}
-      - name: Attach to release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+
+  publish:
+    needs: binary
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      # Publish only after all four verified binaries exist, avoiding partial releases.
+      - uses: actions/download-artifact@v4
         with:
-          files: ${{ env.ASSET }}
+          pattern: odw-*
+          path: artifacts
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/odw-*.gz
+          fail_on_unmatched_files: true
+          generate_release_notes: true

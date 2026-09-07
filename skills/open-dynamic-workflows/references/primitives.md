@@ -6,10 +6,14 @@ top-level `return` are legal), with `meta` declared via `export const meta` at
 the top (`meta.name` and `meta.description` are required; no other top-level
 `import`/`export` may appear in the file).
 
+ODW supports these core workflow conventions; this does not promise full Claude
+runtime equivalence. The execution, validation, and recovery boundaries below
+also apply when migrating a shared workflow.
+
 ## agent
 
 ```js
-agent(prompt, opts?) -> Promise<string | object>
+agent(prompt, opts?) -> Promise<unknown>
 ```
 
 Run one coding agent on `prompt`. The only primitive that does real work; every
@@ -24,21 +28,29 @@ other primitive organizes calls to it.
   inside `parallel`/`pipeline`, where the global phase is shared.
 - **opts.adapter** — which configured CLI to use (e.g. `"codex"`); defaults to
   the config's `defaultAdapter`.
-- **opts.model** — a model id forwarded to the adapter's declared model flag
-  (e.g. `claude --model …`). If the adapter declares no `flags.model` in config,
-  the option is not silently dropped — a routing note appears in the run's logs.
-  Model ids do not transfer across CLIs.
+- **opts.model** — a model id forwarded through the adapter's `{model}` template
+  token or declared `flags.model` (e.g. `claude --model …`). Without either
+  carrier, the CLI's default model is used and a routing note records the
+  ignored option. Model ids are CLI-specific. `meta.model` and
+  `meta.phases[].model` are accepted metadata, but do not select execution
+  models; pass `{ model }` to each `agent()` call that needs one.
 - **opts.agentType** — a **persona** injected into the prompt (e.g.
   `"code-reviewer"`), so it works on every CLI. It is **not** an adapter name and
-  never affects adapter selection — only `opts.adapter` does.
+  never affects adapter selection — only `opts.adapter` does. It does not load
+  Claude's built-in role permissions, tools, or project subagent definitions.
 - **opts.isolation** — `"worktree"` gives this agent a throwaway **git
   worktree** of the source repo (default workspace: the source directory
-  itself). Needs a repo with at least one commit; the agent sees HEAD, and its
-  changes come back as a diff.
+  itself). Needs a repo with at least one commit; the agent sees HEAD without
+  uncommitted changes. The worktree is cleaned up after the call and changes
+  are not merged into the source. `agent()` returns only the reply, not a diff
+  or a persistent worktree path: include required deliverables in the reply or
+  explicitly save them outside the temporary worktree.
 
-Returns the reply text, or the validated object when `schema` is set. Throws on
-hard failure (the CLI errored, or the schema never validated). **Inside
-`parallel`/`pipeline` a thrown call becomes a `null` slot instead.**
+Returns the reply text, or the validated JSON value when `schema` is set. CLI
+errors and exhausted schema retries throw. Inside `parallel`/`pipeline`, these
+recoverable failures become `null`. Fatal errors — stop requests, exhausted
+estimated budgets, the total-agent cap, and invalid adapter/run configuration —
+propagate and terminate the run.
 
 ## parallel
 
@@ -47,8 +59,9 @@ parallel(thunks: Array<() => Promise<T>>) -> Promise<Array<T | null>>
 ```
 
 Run every zero-arg thunk concurrently and **wait for all of them** (a barrier).
-Results come back in input order; a thunk that throws yields `null` in its slot,
-so one failure does not sink the batch.
+Results come back in input order; a recoverable failure yields `null` in its
+slot. After all thunks settle, any fatal error is rethrown. Already-running
+agents are not killed by this barrier.
 
 Use `parallel` when the next step needs the entire batch at once — dedup, tally,
 or a synthesis pass over all results.
@@ -83,7 +96,8 @@ const results = await pipeline(
 )
 ```
 
-A stage that throws drops that item to `null` and skips its remaining stages.
+A recoverable stage failure drops that item to `null` and skips its remaining
+stages. Fatal errors propagate after the running chains settle.
 `pipeline(items, stage)` with a single stage is just "map this over items
 concurrently" — handy when each step itself fans out with `parallel`.
 
@@ -110,8 +124,15 @@ JSON-looking input that fails to parse is rejected rather than silently passed
 through as a string). `budget.total` is the token target set with
 `odw run … --budget <tokens>`, else `null`; scale depth to it, e.g.
 `budget.total ? Math.floor(budget.total / 120_000) : 5`.
-In v1 `spent()` is a best-effort stub (`0`) and `remaining()` is `total` (or
-`Infinity` when no target); real token accounting is a v1.5+ increment.
+`spent()` is `ceil(total successful final-reply characters / 4)` across this
+run, including nested workflows. Input tokens, failed calls, and intermediate
+schema-retry replies are not counted. `remaining()` is
+`max(0, total - spent())`, or `Infinity` without a target.
+
+After obtaining a dispatch slot and checking pause/stop, the scheduler rejects
+new agent calls when this estimate reaches the target. In-flight calls may
+finish and exceed it. This is a dispatch guard based on an estimate, not a
+limit on actual token usage or billing.
 
 ## workflow
 
@@ -119,10 +140,25 @@ In v1 `spent()` is a best-effort stub (`0`) and `remaining()` is `total` (or
 workflow(nameOrRef, args?) -> Promise<unknown>
 ```
 
-Run another workflow inline. The global is injected for Claude-dialect
-compatibility, but it is **not yet implemented in odw** — calling it throws a
-clear "not implemented" error. Compose with `agent`/`parallel`/`pipeline`
-instead for now.
+Run another workflow inline and return its final value. A string resolves a
+name from the managed workflow directories; `{ scriptPath }` resolves relative
+to the run's source directory. The child shares the parent's scheduler,
+concurrency cap, agent count, controls, and estimated budget. Its phases have
+a `▸ <name>` prefix; it has no separate run id. Omitted child `args` becomes
+`null`, rather than inheriting the parent's input.
+
+Only one level is supported: calling `workflow()` from a child throws. Missing
+files, unknown names, and invalid child scripts also throw; ordinary errors
+can become `null` when this call is inside `parallel`/`pipeline`.
+
+## validate (ODW extension)
+
+`validate(source)` loads a candidate workflow without running its body and
+returns `{ ok, meta?, errors, warnings }`. Loading evaluates `meta` as
+JavaScript, so use this helper only on trusted source. Warnings flag selected portability
+hazards such as `Date.now()` and `Math.random()`; they do not block execution.
+This helper is not part of the shared core surface. A script's own `validate`
+binding takes precedence over the injected helper.
 
 ## schema
 
@@ -146,10 +182,23 @@ const FINDINGS = {
 const result = await agent('Review this diff.', { schema: FINDINGS }) // -> validated object
 ```
 
-Supported keywords: `type` (object/array/string/integer/number/boolean/null),
-`properties`, `required`, `additionalProperties`, `items`, `minItems`, `enum`.
-Schema is what makes multi-stage pipelines reliable: without it, downstream
-stages parse free text and composition becomes guesswork.
+The validator implements this subset, not the full JSON Schema standard:
+
+| Shape | Enforced constraints |
+|---|---|
+| `type` as one string | `object`, `array`, `string`, `integer`, `number`, `boolean`, `null` |
+| `type: "object"` | `properties`, `required`, and `additionalProperties: false` |
+| `type: "array"` | `items` as one schema object and `minItems` |
+| `enum` | Structural membership, independently of `type` |
+
+Object and array constraints need their explicit `type`; omitting it skips
+those checks. Schema-valued `additionalProperties`, tuple/boolean schemas,
+and union-type arrays are outside this subset. Unsupported keywords such as
+`const`, `$ref`/`$defs`, `oneOf`/`anyOf`/`allOf`, `minimum`/`maximum`, `pattern`,
+`format`, and `maxItems` are not enforced: they may still be sent to the agent
+as instructions, but passing validation does not prove them. An unknown
+`type` produces a validation error. Rewrite schemas into the supported subset
+or explicitly check additional constraints in the workflow.
 
 ## Composition patterns
 
@@ -168,8 +217,17 @@ These are not new primitives — just primitives plus ordinary JavaScript.
 Out-of-order execution is fine **as long as your reduction is order-independent**
 (accumulate into a set, dedup, tally). Do **not** branch on which agent finished
 first or dispatch follow-ups based on completion timing — that makes the run
-non-reproducible. This is why v1 offers `parallel`/`pipeline` (batch dispatch
-decided by inputs) rather than raw, individually-awaited futures.
+non-reproducible. Prefer input-driven `parallel`/`pipeline` compositions.
+
+These are authoring guidelines, not a sandbox. ODW executes JavaScript with
+`AsyncFunction` and does not isolate the script from Node globals or filesystem
+and shell access. Run only trusted scripts. Portability warnings do not prove
+that a script is safe or will run in another runtime.
+
+`odw resume` releases a paused live worker at the next dispatch boundary. It
+does not replay completed calls after a crash. `odw rerun` creates a new run
+from the recorded inputs and executes its work again; agent results are not
+journaled for crash recovery.
 
 ## Limits
 

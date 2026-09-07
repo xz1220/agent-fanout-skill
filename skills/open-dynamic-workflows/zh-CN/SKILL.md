@@ -67,7 +67,7 @@ return await agent(
 | `args` | workflow 的输入（注入）。 |
 | `budget` | `{ total, spent(), remaining() }`——按 token 目标扩缩深度。 |
 | `workflow(ref, args?)` | 内联调用另一个 workflow（仅一层）。`ref` 是受管目录中的名字或 `{ scriptPath }`；子 workflow 共享本次运行的并发上限、agent 计数和预算。 |
-| `validate(source)` | 只编译不执行地校验一段候选 workflow 源码；返回 `{ ok, meta?, errors, warnings }`。**ODW 扩展**——不属于 Claude Code 方言。 |
+| `validate(source)` | 解析并编译检查可信源码,不运行工作流正文;元数据会被求值。返回 `{ ok, meta?, errors, warnings }`。**ODW 扩展**——不属于 Claude Code 方言。 |
 
 `agent` 的 `opts`：`{ adapter?, schema?, label?, phase?, model?, agentType?, isolation? }`。
 `adapter` 选择用哪个 CLI；`schema` 是一个原始 JSON Schema 对象（选项，不是全局）；
@@ -112,13 +112,14 @@ Codex、Claude Code、Gemini、Qwen、Kimi 开箱即用，无需配置。要换�
 
 ## 必须知道的行为
 
-- **隔离**：agent 各自独立运行，互相看不见——除非脚本把一个的输出写进另一个的
-  prompt。
+- **上下文**：每个 agent 接收自己的提示词；使用默认 source 目录的 agent 共享文件。
+  文件修改需要分开时,请选择 worktree 隔离。
 - **工作区**：agent 直接在本次运行的 source 目录（`--source`，默认当前目录）里
   工作——与 Claude Code 自带 Workflow 工具同语义。需要隔离时按 agent 传
   `isolation: "worktree"`：agent 获得一个一次性 **git worktree**（要求 source
-  是有至少一次提交的 git 仓库；agent 看到的是 HEAD，不含未提交改动），其改动
-  以 diff 形式返回——真实目录不被改动。
+  是有至少一次提交的 git 仓库；agent 看到的是 HEAD，不含未提交改动）。临时工作区
+  随后会被删除,改动不会自动合并。`agent()` 返回回复而非 diff；需要保留的交付物应放进
+  回复,或在清理前显式持久化。
 - **成本**：并发有上限（默认 `min(16, cpu核数-2)`），单次运行总派发量有硬兜底；超出
   预期时用 `odw pause` / `odw stop`。
 - **结果**：引擎不会替你 commit、push 或应用 diff。先检视 `return` 值，再决定下一步。
@@ -129,6 +130,6 @@ Codex、Claude Code、Gemini、Qwen、Kimi 开箱即用，无需配置。要换�
 | --- | --- |
 | 在脚本里 import 原语或其他模块 | 原语是注入全局；任何额外的顶层 `import`/`export` 都会被加载器拒绝。 |
 | `meta` 里用了变量、展开或函数调用 | `meta` 必须是纯字面量。 |
-| 期望 `parallel`/`pipeline` 里的失败抛错 | 失败的槽位是 `null`；归并前先 `.filter(Boolean)`。 |
+| 将 `parallel`/`pipeline` 中所有失败等同处理 | 可恢复失败变 `null`；停止、预算耗尽和派发上限错误会中止。要求完整交付时须重试缺失结果或报告失败,仅允许部分结果时才过滤。 |
 | 按"哪个 agent 先跑完"来分支 | 破坏可复现性；归并要保持顺序无关。 |
 | 用了 `validate()` 还指望脚本跑在 Claude Code 上 | `validate` 是 ODW 扩展，只能在 odw 上运行。 |

@@ -59,9 +59,9 @@ workflow,就成了你在任何 agent 上都能跑的资产。
 
 - **可移植** —— 同一份 workflow 脚本可跑在 Codex、Claude Code、Gemini、Qwen、Kimi、
   OMP、Kilo、OpenCode、Cursor 或你自己的 CLI 上;换底层 agent 只需换适配器。
-- **Claude Code 方言,完整支持** —— `export const meta` + 注入的 `agent` / `parallel` /
+- **Claude 风格的工作流原语** —— `export const meta` + 注入的 `agent` / `parallel` /
   `pipeline` / `phase` / `log` / `args` / `budget` / `workflow` 全局(含嵌套
-  workflow),支持顶层 `await` 和 `return`。为 Claude Code 写的脚本在这里照跑,反之亦然。
+  workflow),支持顶层 `await` 和 `return`。迁移脚本前请核对下方的[兼容性检查表](#兼容性与迁移)。
 - **带 Chat Host 的实时观测台** —— 在浏览器里和 Codex 正常对话;提到 ODW 或 workflow
   的回合会关联到真实异步运行,CLI 发起的 job 也会以实时 DAG 展示,不会污染宿主 agent
   的上下文。
@@ -200,18 +200,37 @@ odw run examples/fan-out-reduce.js --wait --args '{"question": "Design a rate li
 | 原语 | 作用 |
 | --- | --- |
 | `agent(prompt, opts?)` | 让一个 coding agent 跑一个子任务。唯一真正"产出工作"的原语。返回文本;设了 `opts.schema` 则返回校验过的对象。 |
-| `parallel(thunks)` | 一组任务并发执行、**等全部完成**(屏障)。失败的那个变 `null`。 |
+| `parallel(thunks)` | 一组任务并发执行、**等全部完成**(屏障)。可恢复失败变 `null`;停止、预算耗尽和派发上限错误会中止运行。 |
 | `pipeline(items, ...stages)` | 每个条目独立穿过各 stage(**无屏障**)。每个 stage 收 `(prev, item, index)`。 |
 | `phase(title)` / `log(msg)` | 把进度归入某阶段 / 发一行进度消息。 |
 | `schema`(JSON Schema) | 给 `agent` 的输出定一个类型契约;回复会被校验,不符就重试。 |
 | `args` | workflow 的输入,原样注入。 |
 | `budget` | `{ total, spent(), remaining() }`——按 token 目标动态扩缩深度。 |
 | `workflow(ref, args?)` | 内联调用另一个 workflow(仅一层)。子 workflow 共享本次运行的并发上限、agent 计数与预算;其 phase 以独立泳道归组。 |
-| `validate(source)` | 只编译不执行地校验一段候选 workflow 源码——让 workflow 能生成 workflow 的自举缝。**ODW 扩展**(不属于 Claude Code 方言)。 |
+| `validate(source)` | 解析并编译检查可信源码,不运行工作流正文;加载时会求值元数据。**ODW 扩展**(不属于 Claude Code 方言)。 |
 
 下一步需要"全量结果一次到位"(去重、计票、综合)时用 **`parallel`**;多阶段处理默认用
 **`pipeline`**。归并要保持顺序无关——按"谁先跑完"分支会破坏可复现性。完整参考见
 [`skills/open-dynamic-workflows/references/primitives.md`](skills/open-dynamic-workflows/references/primitives.md)。
+
+## 兼容性与迁移
+
+ODW 已实现下列原语能力。依赖宿主私有运行机制的脚本,迁移前需要逐项核对：
+
+| 功能 | ODW 的行为与迁移要求 |
+| --- | --- |
+| 嵌套 `workflow()` | 已实现一层嵌套,共享父任务的调度器、控制和预算。更深层的调用需要展平。 |
+| 模型选择 | 在 `agent(..., {model})` 中传该 CLI 的模型 ID。`meta.model` 和阶段元数据不设置执行模型;适配器没有模型参数时会记录路由说明。 |
+| `agentType` | 将人设加入提示词,不会加载宿主的同名子 agent 配置或选择适配器。 |
+| 工作区隔离 | 从已保存的 HEAD 创建临时工作区,不含未保存修改,结束后清理。不会自动合并,`agent()` 返回回复而非 diff;需保留的交付物应放进回复或显式持久化。 |
+| 预算 | 按成功调用的最终回复字符数估算 token,不计输入、失败调用及重试中间回复。预算检查阻止后续派发;已经运行的调用可能使总量超过目标。 |
+| JSON Schema | 只校验[已列出的子集](skills/open-dynamic-workflows/zh-CN/references/primitives.md#schema)。`$ref`、`const`、`oneOf` 等约束不会生效;请明确声明对象/数组类型并使用受支持的约束。 |
+| 脚本可信性 | 只运行可信脚本。加载器会执行 JavaScript 求值,包括元数据;编译检查和兼容性警告都不提供沙箱隔离。 |
+| 恢复 | `resume` 继续已暂停且仍存活的 worker。`rerun` 从头执行,崩溃后不会重放并复用已完成调用。 |
+
+原语名称一致不代表运行机制完全等价。`validate(source)` 是 ODW 扩展,迁移到未提供它的
+宿主时需要去掉。可恢复失败产生的 `null` 需要显式处理：接受部分结果、重试,或在要求完整
+交付时报告失败。
 
 ## 运行与观测
 
@@ -446,7 +465,7 @@ npm run build:binary  # 打包 + Node SEA + postject → 单个自包含的 ./bu
 [`deep-research-verified.js`](examples/deep-research-verified.js) 连同可进 cron 的
 包装脚本一起入库。更早合入 `main` 的:看板的本地 **Chat Host**(提到 ODW 的回合交给真实
 异步运行)、桌面(Tauri)App **退役**、方言补**完整**——嵌套 `workflow()`(共享调度与预算,
-仅一层)、`budget.spent()` 真实(估算)计量令 `--budget` 成为硬上限、`odw run --adapter
+仅一层)、`budget.spent()` 估算计量及后续派发前的预算检查、`odw run --adapter
 <name>`、随 run 留档的内联脚本运行,以及让 workflow 能生成 workflow 的 `validate()` 原语。
 
 **v0.3.0:****Jobs** 标签页也会展示 **Claude Code 自己的 workflow 运行**——已完成的

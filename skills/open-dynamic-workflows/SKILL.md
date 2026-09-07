@@ -76,7 +76,7 @@ outright, never silently passed through as a string).
 | `args` | The workflow input (injected). |
 | `budget` | `{ total, spent(), remaining() }` — scale depth to a token target. |
 | `workflow(ref, args?)` | Run another workflow inline (one level deep). `ref` is a managed-directory name or `{ scriptPath }`; the child shares this run's concurrency cap, agent counter, and budget. |
-| `validate(source)` | Compile-check a candidate workflow source without executing it; returns `{ ok, meta?, errors, warnings }`. **ODW extension** — not part of Claude Code's dialect. |
+| `validate(source)` | Parse and compile-check trusted source without running its workflow body; metadata is evaluated. Returns `{ ok, meta?, errors, warnings }`. **ODW extension** — not part of Claude Code's dialect. |
 
 `opts` for `agent`: `{ adapter?, schema?, label?, phase?, model?, agentType?, isolation? }`.
 `adapter` picks the CLI; `schema` is a raw JSON Schema object (an option, not
@@ -134,14 +134,16 @@ which vendor's CLI (and whose quota/permissions) every bare `agent()` call uses.
 
 ## Behavior you must know
 
-- **Isolation**: agents run independently and never see each other — unless
-  the script feeds one's output into another's prompt.
+- **Context**: each agent receives its own prompt. Agents using the default
+  source directory share files; use worktree isolation when file edits must be separate.
 - **Workspace**: agents run directly in the run's source directory (`--source`,
   default the current directory) — the same semantics as Claude Code's own
   Workflow tool. For isolation, ask per agent with `isolation: "worktree"`: the
   agent gets a throwaway **git worktree** (needs the source to be a git repo
-  with at least one commit; the agent sees HEAD, not uncommitted edits) and its
-  changes come back as a diff — the real tree is never modified.
+  with at least one commit; the agent sees HEAD, not uncommitted edits).
+  The temporary worktree is removed afterward and changes are not merged.
+  `agent()` returns the reply, not a diff; include required deliverables in the
+  reply or persist them explicitly before cleanup.
 - **Cost**: concurrency is capped (default `min(16, cpus - 2)`) and total
   dispatches per run have a hard guard; use `odw pause` / `odw stop` when a
   run exceeds expectations.
@@ -154,6 +156,6 @@ which vendor's CLI (and whose quota/permissions) every bare `agent()` call uses.
 | --- | --- |
 | Importing primitives or other modules in the script | Primitives are injected globals; any extra top-level `import`/`export` is rejected by the loader. |
 | Variables, spreads, or function calls inside `meta` | `meta` must be a pure literal. |
-| Expecting failures inside `parallel`/`pipeline` to throw | A failed slot is `null`; `.filter(Boolean)` before reducing. |
+| Treating all failures in `parallel`/`pipeline` alike | Recoverable failures become `null`; stop, budget and dispatch-limit errors abort. Retry missing results or fail when every item is required; filter only when partial output is acceptable. |
 | Branching on which agent finished first | Breaks reproducibility; keep reductions order-independent. |
 | Using `validate()` and expecting the script to run on Claude Code | `validate` is an ODW extension and runs on odw only. |

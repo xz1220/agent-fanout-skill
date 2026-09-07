@@ -7,11 +7,11 @@ Changes on main are still awaiting a public release.
 
 | Item | Disposition | Remaining value |
 | --- | --- | --- |
-| [#6 — primitive compatibility](https://github.com/xz1220/open-dynamic-workflows/issues/6) | Close after the documentation update | The old missing primitives are implemented. README, both skill references, authoring types and schema contract tests now state the remaining boundaries. This closes a clarification task, not a promise of full runtime parity. |
+| [#6 — primitive compatibility](https://github.com/xz1220/open-dynamic-workflows/issues/6) | Closed as clarified | The old missing primitives are implemented. README, both skill references, authoring types and schema contract tests now state the remaining boundaries. This closes a clarification task, not a promise of full runtime parity. |
 | [#24 — stalled research runs](https://github.com/xz1220/open-dynamic-workflows/issues/24) | Keep; first follow-up | Persist and expose completed agent results before the whole workflow finishes. |
 | [#23 — MCP write workflows](https://github.com/xz1220/open-dynamic-workflows/issues/23) | Keep; second follow-up | Distinguish tool approval outcomes and verify required side effects. |
 | [#31 — command primitive](https://github.com/xz1220/open-dynamic-workflows/issues/31) | Keep as an enhancement | A managed command step that does not launch a model. |
-| [#30 — custom upgrades and execution policy](https://github.com/xz1220/open-dynamic-workflows/pull/30) | Keep as a draft; split before merging | Custom-deployment documentation, workflow authoring guidance and an independently reviewed execution-policy proposal. |
+| [#30 — custom upgrades and execution policy](https://github.com/xz1220/open-dynamic-workflows/pull/30) | Close the current proposal without merging | Overlapping fixes are superseded. Retain the small documentation follow-ups below; managed execution policy is not planned for the current scope. |
 
 ## Completed results are the next reliability improvement
 
@@ -83,9 +83,23 @@ main. Conflict or age alone is not a reason to discard the contribution.
   [rerun origin](https://github.com/zzjjzz-zz/open-dynamic-workflows/blob/ad728e7ecf748cbe019cfd2dae31ec7a4bc16b1e/src/cli.ts#L545).
 
 The existing install/version work (`86d86e0`, `501f9e6`) and inode-reuse fix
-(`ceb6654`) supersede overlapping parts of #30. Close the original PR only when
-its remaining useful parts have explicit successors, or the author withdraws
-them. It is not ready to merge as one change.
+(`ceb6654`) supersede overlapping parts of #30. The project currently prioritizes
+the portable local runtime, recoverable results and useful diagnostics.
+A root-owned execution policy, managed root workflow and authorization provenance
+would add a separate administration contract. That proposal is not selected for
+the current scope, so the combined PR should be closed without merging rather
+than kept indefinitely as a draft. This does not mark its policy implemented.
+
+The useful documentation work remains explicitly tracked here:
+
+- [ ] Add a short guide to keeping a public wrapper and service entrypoint
+  separate from the official runtime, using the current installer's behavior.
+- [ ] Clarify that concurrency is a cap, not a target task count; recommend
+  independent, verifiable subtasks and checking for reusable workflows.
+
+Revisit managed execution only with a concrete hosting user and an independently
+reviewed threat model. A future proposal must address the authorization gaps
+above. It is not a prerequisite for fixing #24 or adding basic #23 diagnostics.
 
 The previously merged PRs, closed rename proposal #2 and superseded #33 need no
 state change. None of the unresolved enhancement requests was closed solely
